@@ -420,12 +420,8 @@
         "addressPrefix": "[parameters('subnetPrefix')]",
         "networkSecurityGroup": {
           "id": "[resourceId('Microsoft.Network/networkSecurityGroups', concat(parameters('vnetName'), '-nsg'))]"
-        },
-        "natGateway": {
-          "id": "[if(parameters('enableNatGateway'), resourceId('Microsoft.Network/natGateways', concat(parameters('vnetName'), '-natgw')), json('null'))]"
         }
-      },
-      "tags": "[parameters('resourceTags')]"
+      }
     },
     {
       "type": "Microsoft.App/managedEnvironments",
