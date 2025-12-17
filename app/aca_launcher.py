@@ -97,6 +97,12 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         self._started = False
         self._logger = logger  # Use the module-level logger
 
+        # Initialize shutdown events for threads
+        import threading
+        self._reconcile_grpc_metadata_shutdown_event = threading.Event()
+        self._run_worker_monitoring_shutdown_event = threading.Event()
+        self._reconcile_location_utilization_metrics_shutdown_event = threading.Event()
+
         # Extract config from inst_data or use kwargs directly
         config = inst_data.config_dict if inst_data else kwargs
 
