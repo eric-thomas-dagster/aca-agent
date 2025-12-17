@@ -90,8 +90,9 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         """
         self._inst_data = inst_data
 
-        # Initialize attributes expected by parent class
+        # Initialize attributes expected by parent class cleanup methods
         self._reconcile_grpc_metadata_thread = None
+        self._run_worker_monitoring_thread = None
 
         # Extract config from inst_data or use kwargs directly
         config = inst_data.config_dict if inst_data else kwargs
