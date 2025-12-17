@@ -163,7 +163,6 @@
       }
     },
     {
-      "condition": "[or(parameters('enableNatGateway'), true)]",
       "type": "Microsoft.Network/virtualNetworks/subnets",
       "apiVersion": "2020-11-01",
       "name": "[concat(parameters('vnetName'), '/', parameters('subnetName'))]",
