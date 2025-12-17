@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""
+ACA User Code Launcher for Dagster Cloud
+
+This custom launcher enables Dagster Cloud agents to launch code servers
+as Azure Container Apps, providing a fully managed container platform on Azure.
+
+Architecture:
+- Agent runs on Azure Container Apps (always-on)
+- Code servers launch as Container Apps in the same environment (long-lived)
+- All within customer's Azure subscription
+
+Author: Dagster Solutions Engineering
+License: MIT
+"""
+
+import os
+import logging
+import time
+from typing import Dict, Optional, List
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.appcontainers import ContainerAppsAPIClient
+from azure.mgmt.appcontainers.models import (
+    ContainerApp,
+    Container,
+    Configuration,
+    Template,
+    Scale,
+    ScaleRule,
+    Ingress,
+    Secret,
+    EnvironmentVar,
+    ContainerResources,
+    ContainerAppProbe,
+    ContainerAppProbeHttpGet,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class AcaUserCodeLauncher:
+    """
+    Dagster Cloud user code launcher that deploys code servers to Azure Container Apps.
+
+    This launcher creates Container Apps (not ACI) for code servers, providing:
+    - Zero-downtime deployments via ACA's built-in blue-green
+    - Automatic health checks and auto-healing
+    - Integrated monitoring and logging
+    - Consistent platform (all on ACA)
+
+    Configuration (dagster.yaml):
+        user_code_launcher:
+          module: aca_launcher
+          class: AcaUserCodeLauncher
+          config:
+            subscription_id: YOUR_SUBSCRIPTION_ID
+            resource_group: dagster-aca-rg
+            environment_name: dagster-aca-env
+            location: eastus
+            cpu: 0.5
+            memory: 1.0Gi
+    """
+
+    def __init__(self, config: Dict):
+        """
+        Initialize the ACA launcher with Azure credentials and configuration.
+
+        Args:
+            config: Configuration dictionary from dagster.yaml
+        """
+        self.subscription_id = config.get("subscription_id") or os.getenv("AZURE_SUBSCRIPTION_ID")
+        self.resource_group = config.get("resource_group", "dagster-aca-rg")
+        self.environment_name = config.get("environment_name", "dagster-aca-env")
+        self.location = config.get("location", "eastus")
+        self.cpu = config.get("cpu", 0.5)
+        self.memory = config.get("memory", "1.0Gi")
+
+        # Azure Container Apps client
+        self.credential = DefaultAzureCredential()
+        self.aca_client = ContainerAppsAPIClient(
+            credential=self.credential,
+            subscription_id=self.subscription_id
+        )
+
+        # Get managed environment ID
+        self.environment_id = self._get_environment_id()
+
+        logger.info(
+            f"Initialized AcaUserCodeLauncher: rg={self.resource_group}, "
+            f"env={self.environment_name}, cpu={self.cpu}, memory={self.memory}"
+        )
+
+    def _get_environment_id(self) -> str:
+        """Get the full resource ID of the Container Apps environment."""
+        return (
+            f"/subscriptions/{self.subscription_id}"
+            f"/resourceGroups/{self.resource_group}"
+            f"/providers/Microsoft.App/managedEnvironments/{self.environment_name}"
+        )
+
+    def launch_code_server(
+        self,
+        deployment_name: str,
+        location_name: str,
+        image: str,
+        environment_variables: Optional[Dict[str, str]] = None,
+        container_context: Optional[Dict] = None
+    ) -> str:
+        """
+        Launch a Dagster code server as an Azure Container App.
+
+        Args:
+            deployment_name: Dagster deployment name (e.g., "prod")
+            location_name: Code location name (e.g., "my_dagster_project")
+            image: Container image URL (e.g., "myacr.azurecr.io/dagster-code:latest")
+            environment_variables: Environment variables to pass to container
+            container_context: Additional ACA-specific configuration
+
+        Returns:
+            Container App name (used to track/manage the app)
+        """
+        # Generate Container App name
+        # Format: dagster-{deployment}-{location}
+        # Sanitize for ACA naming rules (lowercase alphanumeric and hyphens, max 32 chars)
+        app_name = f"dagster-{deployment_name}-{location_name}"[:32]
+        app_name = app_name.lower().replace("_", "-")
+
+        logger.info(
+            f"Launching code server: deployment={deployment_name}, "
+            f"location={location_name}, image={image}, app={app_name}"
+        )
+
+        # Build environment variables
+        env_vars = self._build_environment_variables(
+            deployment_name, location_name, environment_variables
+        )
+
+        # Apply container_context overrides if provided
+        cpu = self.cpu
+        memory = self.memory
+        if container_context:
+            cpu = container_context.get("cpu", cpu)
+            memory = container_context.get("memory", memory)
+
+        # Create Container App configuration
+        container_app = ContainerApp(
+            location=self.location,
+            managed_environment_id=self.environment_id,
+            configuration=Configuration(
+                # No ingress needed - code servers communicate via internal gRPC
+                ingress=None,
+                # No secrets needed - using managed identity
+                secrets=[],
+                # Revisions mode: Single (rolling updates)
+                # For zero-downtime: use Multiple
+                active_revisions_mode="Single",
+            ),
+            template=Template(
+                containers=[
+                    Container(
+                        name="code-server",
+                        image=image,
+                        resources=ContainerResources(
+                            cpu=cpu,
+                            memory=memory
+                        ),
+                        env=env_vars,
+                        # Code servers typically expose port 4000 for gRPC
+                        # No need to expose publicly - internal only
+                    )
+                ],
+                scale=Scale(
+                    min_replicas=1,  # Always running
+                    max_replicas=1,  # Single instance per code location
+                    # No scale rules - code servers don't auto-scale
+                    rules=[]
+                )
+            ),
+            # Tags for tracking and management
+            tags={
+                "dagster-deployment": deployment_name,
+                "dagster-location": location_name,
+                "dagster-component": "code-server",
+                "managed-by": "dagster-cloud-agent"
+            }
+        )
+
+        try:
+            # Check if Container App already exists
+            existing_app = None
+            try:
+                existing_app = self.aca_client.container_apps.get(
+                    resource_group_name=self.resource_group,
+                    container_app_name=app_name
+                )
+                logger.info(f"Container App {app_name} already exists, updating...")
+            except Exception:
+                logger.info(f"Container App {app_name} does not exist, creating...")
+
+            # Create or update the Container App
+            poller = self.aca_client.container_apps.begin_create_or_update(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name,
+                container_app_envelope=container_app
+            )
+
+            # Wait for creation/update to complete (typically 30-60 seconds)
+            result = poller.result(timeout=180)
+
+            logger.info(
+                f"Successfully launched code server: {app_name} "
+                f"(provisioning_state={result.provisioning_state})"
+            )
+
+            return app_name
+
+        except Exception as e:
+            logger.error(f"Failed to launch code server {app_name}: {e}")
+            raise
+
+    def update_code_server(
+        self,
+        app_name: str,
+        image: str,
+        environment_variables: Optional[Dict[str, str]] = None
+    ):
+        """
+        Update an existing code server with a new image (code deployment).
+
+        This triggers ACA's built-in blue-green deployment:
+        1. New revision created with updated image
+        2. Health checks performed
+        3. Traffic gradually shifted to new revision
+        4. Old revision deactivated
+
+        Args:
+            app_name: Container App name
+            image: New container image URL
+            environment_variables: Updated environment variables
+        """
+        logger.info(f"Updating code server: {app_name} with image {image}")
+
+        try:
+            # Get existing app
+            existing_app = self.aca_client.container_apps.get(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name
+            )
+
+            # Update container image
+            existing_app.template.containers[0].image = image
+
+            # Update environment variables if provided
+            if environment_variables:
+                env_vars = []
+                for key, value in environment_variables.items():
+                    env_vars.append(EnvironmentVar(name=key, value=value))
+                existing_app.template.containers[0].env = env_vars
+
+            # Apply update (triggers blue-green deployment)
+            poller = self.aca_client.container_apps.begin_create_or_update(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name,
+                container_app_envelope=existing_app
+            )
+
+            result = poller.result(timeout=180)
+
+            logger.info(
+                f"Successfully updated code server: {app_name} "
+                f"(provisioning_state={result.provisioning_state})"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to update code server {app_name}: {e}")
+            raise
+
+    def terminate_code_server(self, app_name: str):
+        """
+        Terminate a code server by deleting the Container App.
+
+        Note: Typically, code servers are long-lived and NOT terminated.
+        This method exists for cleanup scenarios (e.g., code location deleted).
+
+        Args:
+            app_name: Container App name to delete
+        """
+        logger.info(f"Terminating code server: {app_name}")
+
+        try:
+            poller = self.aca_client.container_apps.begin_delete(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name
+            )
+            poller.result(timeout=120)
+            logger.info(f"Successfully terminated code server: {app_name}")
+
+        except Exception as e:
+            logger.error(f"Failed to terminate code server {app_name}: {e}")
+            raise
+
+    def get_code_server_status(self, app_name: str) -> Dict:
+        """
+        Get the status of a code server Container App.
+
+        Args:
+            app_name: Container App name
+
+        Returns:
+            Dictionary with status information
+        """
+        try:
+            app = self.aca_client.container_apps.get(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name
+            )
+
+            # Get latest revision status
+            latest_revision = app.latest_revision_name
+            revision_fqdn = app.latest_revision_fqdn if hasattr(app, 'latest_revision_fqdn') else None
+
+            return {
+                "name": app_name,
+                "provisioning_state": app.provisioning_state,
+                "latest_revision": latest_revision,
+                "latest_ready": app.latest_ready_revision_name if hasattr(app, 'latest_ready_revision_name') else None,
+                "running_status": app.running_status if hasattr(app, 'running_status') else "Unknown",
+                "fqdn": revision_fqdn,
+            }
+
+        except Exception as e:
+            logger.warning(f"Failed to get status for {app_name}: {e}")
+            return {"name": app_name, "error": str(e)}
+
+    def list_code_servers(self, deployment_name: Optional[str] = None) -> List[Dict]:
+        """
+        List all code server Container Apps, optionally filtered by deployment.
+
+        Args:
+            deployment_name: Optional deployment name to filter by
+
+        Returns:
+            List of Container App information
+        """
+        try:
+            apps = self.aca_client.container_apps.list_by_resource_group(
+                resource_group_name=self.resource_group
+            )
+
+            results = []
+            for app in apps:
+                # Filter by Dagster tags
+                if app.tags and app.tags.get("managed-by") == "dagster-cloud-agent":
+                    if deployment_name and app.tags.get("dagster-deployment") != deployment_name:
+                        continue
+
+                    results.append({
+                        "name": app.name,
+                        "deployment": app.tags.get("dagster-deployment"),
+                        "location": app.tags.get("dagster-location"),
+                        "provisioning_state": app.provisioning_state,
+                        "latest_revision": app.latest_revision_name,
+                    })
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Failed to list code servers: {e}")
+            return []
+
+    def _build_environment_variables(
+        self,
+        deployment_name: str,
+        location_name: str,
+        custom_env: Optional[Dict[str, str]] = None
+    ) -> List[EnvironmentVar]:
+        """
+        Build environment variables list for the code server container.
+
+        Args:
+            deployment_name: Dagster deployment name
+            location_name: Code location name
+            custom_env: Additional environment variables
+
+        Returns:
+            List of EnvironmentVar objects
+        """
+        env_vars = [
+            EnvironmentVar(name="DAGSTER_CLOUD_DEPLOYMENT_NAME", value=deployment_name),
+            EnvironmentVar(name="DAGSTER_CLOUD_CODE_LOCATION_NAME", value=location_name),
+            EnvironmentVar(
+                name="DAGSTER_CLOUD_URL",
+                value=os.getenv("DAGSTER_CLOUD_URL", "https://dagster.cloud")
+            ),
+        ]
+
+        # Add custom environment variables
+        if custom_env:
+            for key, value in custom_env.items():
+                env_vars.append(EnvironmentVar(name=key, value=value))
+
+        return env_vars
+
+    def scale_code_server(self, app_name: str, min_replicas: int = 1, max_replicas: int = 1):
+        """
+        Scale a code server (change replica count).
+
+        Typically, code servers run with 1 replica, but this allows scaling
+        for high-availability or load distribution.
+
+        Args:
+            app_name: Container App name
+            min_replicas: Minimum replicas
+            max_replicas: Maximum replicas
+        """
+        logger.info(f"Scaling code server {app_name}: min={min_replicas}, max={max_replicas}")
+
+        try:
+            # Get existing app
+            app = self.aca_client.container_apps.get(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name
+            )
+
+            # Update scale configuration
+            app.template.scale.min_replicas = min_replicas
+            app.template.scale.max_replicas = max_replicas
+
+            # Apply update
+            poller = self.aca_client.container_apps.begin_create_or_update(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name,
+                container_app_envelope=app
+            )
+
+            poller.result(timeout=120)
+            logger.info(f"Successfully scaled code server: {app_name}")
+
+        except Exception as e:
+            logger.error(f"Failed to scale code server {app_name}: {e}")
+            raise
+
+    def get_code_server_logs(self, app_name: str, tail: int = 100) -> str:
+        """
+        Get recent logs from a code server.
+
+        Note: This requires Azure CLI or direct Log Analytics queries.
+        For now, returns instructions for accessing logs.
+
+        Args:
+            app_name: Container App name
+            tail: Number of recent lines to retrieve
+
+        Returns:
+            Log content or instructions
+        """
+        return f"""
+To view logs for {app_name}, use:
+
+  az containerapp logs show -n {app_name} -g {self.resource_group} --tail {tail} --follow
+
+Or query Log Analytics:
+  az monitor log-analytics query \\
+    --workspace {self.resource_group} \\
+    --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == '{app_name}' | top {tail} by TimeGenerated desc"
+"""

@@ -1,0 +1,14 @@
+[project]
+name = "dagster-cloud-agent-aca"
+version = "0.1.0"
+description = "Dagster Cloud Agent scaffold for Azure Container Apps"
+requires-python = ">=3.10"
+dependencies = [
+    "dagster",
+    "requests",
+    "azure-identity",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

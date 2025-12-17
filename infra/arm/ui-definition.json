@@ -1,0 +1,88 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2015-01-01/uiDefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {},
+  "parameterGroups": [
+    {
+      "name": "configuration",
+      "label": { "default": "Configuration" },
+      "parameters": [
+        "location",
+        "environmentName",
+        "containerAppName",
+        "managedIdentityName"
+      ]
+    },
+    {
+      "name": "secrets",
+      "label": { "default": "Secrets" },
+      "parameters": [
+        "keyVaultName",
+        "dagsterCloudApiTokenSecretName",
+        "dagsterDeploymentNameSecretName",
+        "dagsterOrgIdSecretName",
+        "keyVaultSecretNames"
+      ]
+    },
+    {
+      "name": "compute",
+      "label": { "default": "Compute" },
+      "parameters": [
+        "agentCpu",
+        "agentMemory",
+        "numReplicas"
+      ]
+    },
+    {
+      "name": "monitoring",
+      "label": { "default": "Monitoring" },
+      "parameters": [
+        "agentMetricsEnabled",
+        "codeServerMetricsEnabled",
+        "logAnalyticsName"
+      ]
+    },
+    {
+      "name": "deployment",
+      "label": { "default": "Deployment" },
+      "parameters": [
+        "enableZeroDowntimeDeploys",
+        "keyVaultSecretNames"
+      ]
+    },
+    {
+      "name": "network",
+      "label": { "default": "Network" },
+      "parameters": [
+        "enableNatGateway",
+        "vnetName",
+        "vnetPrefix",
+        "subnetName",
+        "subnetPrefix"
+      ]
+    }
+  ],
+  "parameterLabels": {
+    "location": { "default": "Location" },
+    "environmentName": { "default": "Container Apps Environment" },
+    "containerAppName": { "default": "Container App Name" },
+    "managedIdentityName": { "default": "Managed Identity" },
+    "keyVaultName": { "default": "Key Vault" },
+    "dagsterCloudApiTokenSecretName": { "default": "Agent Token (Key Vault secret)" },
+    "dagsterDeploymentNameSecretName": { "default": "Deployment Name (Key Vault secret)" },
+    "dagsterOrgIdSecretName": { "default": "Organization ID (Key Vault secret)" },
+    "keyVaultSecretNames": { "default": "Additional Key Vault Secrets" },
+    "agentCpu": { "default": "Agent vCPU" },
+    "agentMemory": { "default": "Agent Memory" },
+    "numReplicas": { "default": "Num Replicas" },
+    "agentMetricsEnabled": { "default": "Enable Agent Metrics" },
+    "codeServerMetricsEnabled": { "default": "Enable Code Server Metrics" },
+    "logAnalyticsName": { "default": "Log Analytics Workspace" },
+    "enableZeroDowntimeDeploys": { "default": "Zero Downtime Deploys" },
+    "enableNatGateway": { "default": "Enable NAT Gateway" },
+    "vnetName": { "default": "Virtual Network Name" },
+    "vnetPrefix": { "default": "VNet CIDR" },
+    "subnetName": { "default": "Subnet Name" },
+    "subnetPrefix": { "default": "Subnet CIDR" }
+  }
+}

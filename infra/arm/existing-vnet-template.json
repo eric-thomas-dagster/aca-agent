@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": { "type": "string", "defaultValue": "eastus" },
+    "environmentName": { "type": "string", "defaultValue": "dagster-aca-env" },
+    "logAnalyticsName": { "type": "string", "defaultValue": "dagster-logs" },
+    "subnetResourceId": { "type": "string" },
+    "managedIdentityName": { "type": "string", "defaultValue": "dagster-agent-identity" }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2020-08-01",
+      "name": "[parameters('logAnalyticsName')]",
+      "location": "[parameters('location')]",
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2018-11-30",
+      "name": "[parameters('managedIdentityName')]",
+      "location": "[parameters('location')]"
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2022-03-01",
+      "name": "[parameters('environmentName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+      ],
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName')), '2020-08-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName')), '2020-08-01').primarySharedKey]"
+          }
+        },
+        "vnetConfiguration": {
+          "infrastructureSubnetResourceId": "[parameters('subnetResourceId')]"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "environmentName": { "type": "string", "value": "[parameters('environmentName')]" },
+    "logAnalyticsWorkspaceId": { "type": "string", "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]" }
+  }
+}
