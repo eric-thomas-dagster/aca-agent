@@ -12,19 +12,33 @@ This repository provides a complete solution for running Dagster Cloud (Dagster+
 
 ## 🚀 Quick Start
 
-### 1. Build and Publish Docker Image
+### Step 1: Clone the Repository
 
 ```bash
-# Authenticate with GitHub Container Registry
-echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-
-# Build and push the custom image
-docker build -t dagster-aca-agent:latest .
-docker tag dagster-aca-agent:latest ghcr.io/YOUR_GITHUB_USERNAME/dagster-aca-agent:latest
-docker push ghcr.io/YOUR_GITHUB_USERNAME/dagster-aca-agent:latest
+git clone https://github.com/eric-thomas-dagster/aca-agent.git
+cd aca-agent
 ```
 
-### 2. Deploy to Azure
+### Step 2: Choose Your Image Option
+
+**Option A: Use Pre-Built Image (Fastest)**
+```bash
+# Use the ready-to-deploy image
+IMAGE_URL="ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest"
+```
+
+**Option B: Build Your Own**
+```bash
+# Authenticate with GitHub Container Registry
+echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
+
+# Build and push
+docker build -t dagster-aca-agent:latest .
+docker tag dagster-aca-agent:latest ghcr.io/YOUR_USERNAME/dagster-aca-agent:latest
+docker push ghcr.io/YOUR_USERNAME/dagster-aca-agent:latest
+```
+
+### Step 3: Deploy to Azure
 
 **Option A: Azure Portal (No CLI Required)**
 - Follow the complete step-by-step guide in **[QUICKSTART.md](QUICKSTART.md)**
@@ -37,7 +51,7 @@ az deployment group create \
   --resource-group dagster-demo-rg \
   --template-file infra/arm/full-stack-template.json \
   --parameters \
-    agentImage=ghcr.io/YOUR_GITHUB_USERNAME/dagster-aca-agent:latest \
+    agentImage=ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest \
     keyVaultName=dagster-kv-12345 \
     dagsterCloudApiTokenSecretName=DAGSTER-AGENT-TOKEN \
     dagsterCloudApiToken="YOUR_TOKEN_HERE"

@@ -85,7 +85,7 @@ Build and host your own image for full control.
 # 4. Copy the token
 
 # Login to ghcr.io
-echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u eric-thomas-dagster --password-stdin
 ```
 
 ### 0.2 Build the Image
@@ -98,24 +98,24 @@ cd dagster-cloud-agent-aca
 docker build -t dagster-aca-agent:latest .
 
 # Tag for GitHub Container Registry
-# Replace YOUR_GITHUB_USERNAME with your actual GitHub username
-docker tag dagster-aca-agent:latest ghcr.io/YOUR_GITHUB_USERNAME/dagster-aca-agent:latest
+# Replace eric-thomas-dagster with your actual GitHub username
+docker tag dagster-aca-agent:latest ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest
 ```
 
 ### 0.3 Push to GitHub Container Registry
 
 ```bash
 # Push the image
-docker push ghcr.io/YOUR_GITHUB_USERNAME/dagster-aca-agent:latest
+docker push ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest
 
-# ✅ Your image is now available at: ghcr.io/YOUR_GITHUB_USERNAME/dagster-aca-agent:latest
+# ✅ Your image is now available at: ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest
 ```
 
 ### 0.4 Make Image Public (Optional but Recommended)
 
 By default, the image is private. To make it public:
 
-1. Go to https://github.com/YOUR_GITHUB_USERNAME?tab=packages
+1. Go to https://github.com/eric-thomas-dagster?tab=packages
 2. Click on **dagster-aca-agent**
 3. Click **Package settings**
 4. Scroll to **Danger Zone**
@@ -164,7 +164,7 @@ az role assignment create \
 
 You'll need this URL when deploying:
 ```
-ghcr.io/YOUR_GITHUB_USERNAME/dagster-aca-agent:latest
+ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest
 ```
 
 **Example:** If your GitHub username is `johndoe`, your image URL is:
@@ -267,7 +267,7 @@ Now Azure will show you a form to fill in. Here's what to enter:
 - **Log Analytics Name**: `dagster-logs` (leave default)
 - **Container App Name**: `dagster-aca-agent` (leave default)
 - **Managed Identity Name**: `dagster-agent-identity` (leave default)
-- **Agent Image**: `ghcr.io/YOUR_GITHUB_USERNAME/dagster-aca-agent:latest` (⚠️ USE YOUR IMAGE URL from Docker setup!)
+- **Agent Image**: `ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest` (⚠️ USE YOUR IMAGE URL from Docker setup!)
 
 **Secrets (Secure):**
 - **Key Vault Name**: `dagster-demo-kv-12345` (choose a unique name - add random numbers)
@@ -511,7 +511,7 @@ echo "✅ Resource group created: $RESOURCE_GROUP"
 
 ```bash
 # IMPORTANT: Replace with YOUR custom image URL from Docker setup!
-AGENT_IMAGE="ghcr.io/YOUR_GITHUB_USERNAME/dagster-aca-agent:latest"
+AGENT_IMAGE="ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest"
 
 # Deploy the template (secrets passed as secure parameters)
 az deployment group create \
