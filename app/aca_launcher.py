@@ -103,6 +103,9 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         self._run_worker_monitoring_shutdown_event = threading.Event()
         self._reconcile_location_utilization_metrics_shutdown_event = threading.Event()
 
+        # Initialize metrics configuration
+        self._code_server_metrics_config = None  # Optional metrics configuration
+
         # Extract config from inst_data or use kwargs directly
         config = inst_data.config_dict if inst_data else kwargs
 
