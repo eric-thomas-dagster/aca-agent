@@ -46,10 +46,6 @@ dagster_cloud_api:
   # Deployment name
   deployment: ${DAGSTER_CLOUD_DEPLOYMENT_NAME:prod}
 
-# Agent labels for routing (optional)
-# Use labels to route specific code locations to specific agents
-agent_label: ${AGENT_LABEL}
-
 # Logging configuration
 python_logs:
   # Log level for agent
@@ -58,21 +54,8 @@ python_logs:
   # Structured logging for Azure Monitor integration
   managed_python_loggers:
     - dagster_cloud
-    - aci_launcher
-    - azure.mgmt.containerinstance
-
-# Code server settings
-code_server_settings:
-  # Maximum time to wait for code server to start (seconds)
-  startup_timeout: 600
-
-  # Time to keep code servers alive after last use (seconds)
-  # Set to 0 to shut down immediately after use (save costs)
-  # Set higher for better performance (keep warm)
-  server_ttl: 300  # 5 minutes
-
-  # Maximum number of concurrent code servers per agent
-  max_concurrent_code_servers: 10
+    - aca_launcher
+    - azure.mgmt.appcontainers
 
 # Optional: Run launcher for executing runs
 # By default, code servers handle run execution
@@ -80,12 +63,3 @@ code_server_settings:
 # run_launcher:
 #   module: dagster_cloud.run_launcher
 #   class: DefaultRunLauncher
-
-# Resource limits for the agent itself
-# (These don't affect code servers)
-agent_limits:
-  # Maximum memory for agent process
-  max_memory_mb: 512
-
-  # Heartbeat interval to Dagster Cloud
-  heartbeat_interval_seconds: 30

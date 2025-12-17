@@ -18,6 +18,7 @@ import os
 import logging
 import time
 from typing import Dict, Optional, List
+from dagster_cloud.workspace.user_code_launcher import DagsterCloudUserCodeLauncher
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.appcontainers import ContainerAppsAPIClient
 from azure.mgmt.appcontainers.models import (
@@ -38,7 +39,7 @@ from azure.mgmt.appcontainers.models import (
 logger = logging.getLogger(__name__)
 
 
-class AcaUserCodeLauncher:
+class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
     """
     Dagster Cloud user code launcher that deploys code servers to Azure Container Apps.
 
@@ -61,17 +62,23 @@ class AcaUserCodeLauncher:
             memory: 1.0Gi
     """
 
-    def __init__(self, config: Dict):
+    def __init__(self, inst_data=None, **kwargs):
         """
         Initialize the ACA launcher with Azure credentials and configuration.
 
         Args:
-            config: Configuration dictionary from dagster.yaml
+            inst_data: ConfigurableClassData instance (for Dagster serialization)
+            **kwargs: Configuration parameters from dagster.yaml
         """
+        self._inst_data = inst_data
+
+        # Extract config from inst_data or use kwargs directly
+        config = inst_data.config_dict if inst_data else kwargs
+
         self.subscription_id = config.get("subscription_id") or os.getenv("AZURE_SUBSCRIPTION_ID")
-        self.resource_group = config.get("resource_group", "dagster-aca-rg")
-        self.environment_name = config.get("environment_name", "dagster-aca-env")
-        self.location = config.get("location", "eastus")
+        self.resource_group = config.get("resource_group") or os.getenv("AGENT_RESOURCE_GROUP", "dagster-aca-rg")
+        self.environment_name = config.get("environment_name") or os.getenv("ENVIRONMENT_NAME", "dagster-aca-env")
+        self.location = config.get("location") or os.getenv("AZURE_LOCATION", "eastus")
         self.cpu = config.get("cpu", 0.5)
         self.memory = config.get("memory", "1.0Gi")
 
@@ -89,6 +96,26 @@ class AcaUserCodeLauncher:
             f"Initialized AcaUserCodeLauncher: rg={self.resource_group}, "
             f"env={self.environment_name}, cpu={self.cpu}, memory={self.memory}"
         )
+
+    @property
+    def inst_data(self):
+        return self._inst_data
+
+    @classmethod
+    def config_type(cls):
+        return {
+            "subscription_id": str,
+            "resource_group": str,
+            "environment_name": str,
+            "location": str,
+            "cpu": float,
+            "memory": str,
+        }
+
+    @classmethod
+    def from_config_value(cls, inst_data, config_value):
+        """Create an instance from configuration data."""
+        return cls(inst_data=inst_data, **config_value)
 
     def _get_environment_id(self) -> str:
         """Get the full resource ID of the Container Apps environment."""

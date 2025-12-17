@@ -86,7 +86,11 @@ def main():
     # Set DAGSTER_HOME to current directory where dagster.yaml is located
     os.environ["DAGSTER_HOME"] = "/app"
 
-    # Launch the real Dagster Cloud agent with our custom ACI launcher
+    # Add /app to PYTHONPATH so aca_launcher module can be imported
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = f"/app:{pythonpath}" if pythonpath else "/app"
+
+    # Launch the real Dagster Cloud agent with our custom ACA launcher
     # The agent will read configuration from /app/dagster.yaml
     agent_cmd = ["dagster-cloud", "agent", "run"]
 
