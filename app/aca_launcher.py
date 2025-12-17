@@ -17,8 +17,17 @@ License: MIT
 import os
 import logging
 import time
-from typing import Dict, Optional, List
+import asyncio
+from typing import Dict, Optional, List, Collection, NamedTuple
 from dagster_cloud.workspace.user_code_launcher import DagsterCloudUserCodeLauncher
+from dagster_cloud.workspace.user_code_launcher.user_code_launcher import (
+    DagsterCloudGrpcServer,
+    ServerEndpoint,
+    UserCodeLauncherEntry,
+)
+from dagster_cloud.api.dagster_cloud_api import UserCodeDeploymentType
+from dagster_cloud.execution.monitoring import CloudContainerResourceLimits
+from dagster._core.launcher import DefaultRunLauncher
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.appcontainers import ContainerAppsAPIClient
 from azure.mgmt.appcontainers.models import (
@@ -37,6 +46,15 @@ from azure.mgmt.appcontainers.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class AcaServerHandle(NamedTuple):
+    """Handle representing an Azure Container App code server."""
+    app_name: str
+    deployment_name: str
+    location_name: str
+    agent_id: Optional[str]
+    update_timestamp: float
 
 
 class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
@@ -491,3 +509,366 @@ Or query Log Analytics:
     --workspace {self.resource_group} \\
     --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == '{app_name}' | top {tail} by TimeGenerated desc"
 """
+
+    # =========================================================================
+    # Abstract Method Implementations (Required by DagsterCloudUserCodeLauncher)
+    # =========================================================================
+
+    def _get_standalone_dagster_server_handles_for_location(
+        self, deployment_name: str, location_name: str
+    ) -> Collection[AcaServerHandle]:
+        """
+        Return a list of handles representing all running servers for a given location.
+
+        This method is called during reconciliation to discover existing code servers.
+        """
+        handles = []
+        try:
+            # List all Container Apps in the resource group
+            apps = self.aca_client.container_apps.list_by_resource_group(
+                resource_group_name=self.resource_group
+            )
+
+            # Filter for code servers matching this deployment and location
+            for app in apps:
+                if not app.tags or app.tags.get("managed-by") != "dagster-cloud-agent":
+                    continue
+
+                if (app.tags.get("dagster-deployment") == deployment_name and
+                    app.tags.get("dagster-location") == location_name):
+
+                    # Extract metadata from tags
+                    agent_id = app.tags.get("dagster-agent-id")
+                    update_timestamp_str = app.tags.get("dagster-update-timestamp")
+                    update_timestamp = float(update_timestamp_str) if update_timestamp_str else time.time()
+
+                    handles.append(AcaServerHandle(
+                        app_name=app.name,
+                        deployment_name=deployment_name,
+                        location_name=location_name,
+                        agent_id=agent_id,
+                        update_timestamp=update_timestamp
+                    ))
+
+            return handles
+
+        except Exception as e:
+            logger.error(
+                f"Failed to get server handles for {deployment_name}:{location_name}: {e}"
+            )
+            return []
+
+    def _list_server_handles(self) -> List[AcaServerHandle]:
+        """
+        Return a list of all server handles across all deployments and locations.
+
+        Used for cleanup operations.
+        """
+        handles = []
+        try:
+            # List all Container Apps in the resource group
+            apps = self.aca_client.container_apps.list_by_resource_group(
+                resource_group_name=self.resource_group
+            )
+
+            # Filter for Dagster-managed code servers
+            for app in apps:
+                if not app.tags or app.tags.get("managed-by") != "dagster-cloud-agent":
+                    continue
+
+                deployment_name = app.tags.get("dagster-deployment", "unknown")
+                location_name = app.tags.get("dagster-location", "unknown")
+                agent_id = app.tags.get("dagster-agent-id")
+                update_timestamp_str = app.tags.get("dagster-update-timestamp")
+                update_timestamp = float(update_timestamp_str) if update_timestamp_str else time.time()
+
+                handles.append(AcaServerHandle(
+                    app_name=app.name,
+                    deployment_name=deployment_name,
+                    location_name=location_name,
+                    agent_id=agent_id,
+                    update_timestamp=update_timestamp
+                ))
+
+            return handles
+
+        except Exception as e:
+            logger.error(f"Failed to list server handles: {e}")
+            return []
+
+    def _remove_server_handle(self, server_handle: AcaServerHandle) -> None:
+        """
+        Shut down resources associated with the given handle.
+
+        This deletes the Container App.
+        """
+        logger.info(f"Removing server: {server_handle.app_name}")
+        try:
+            self.terminate_code_server(server_handle.app_name)
+        except Exception as e:
+            logger.error(f"Failed to remove server {server_handle.app_name}: {e}")
+            raise
+
+    def _start_new_server_spinup(
+        self,
+        deployment_name: str,
+        location_name: str,
+        desired_entry: UserCodeLauncherEntry,
+    ) -> DagsterCloudGrpcServer:
+        """
+        Create a new server for the given location and return a handle.
+
+        This method starts the server creation but doesn't wait for it to be ready.
+        Waiting happens in _wait_for_new_server_ready.
+        """
+        code_location_deploy_data = desired_entry.code_location_deploy_data
+        image = code_location_deploy_data.image
+
+        if not image:
+            raise ValueError(
+                f"No image specified for {deployment_name}:{location_name}. "
+                "Azure Container Apps launcher requires container images."
+            )
+
+        # Generate Container App name
+        app_name = f"dagster-{deployment_name}-{location_name}"[:32]
+        app_name = app_name.lower().replace("_", "-")
+
+        logger.info(
+            f"Starting server spinup: deployment={deployment_name}, "
+            f"location={location_name}, image={image}, app={app_name}"
+        )
+
+        # Build environment variables
+        env_vars = self._build_environment_variables(
+            deployment_name,
+            location_name,
+            code_location_deploy_data.cloud_context_env
+        )
+
+        # Get resource configuration
+        container_context = code_location_deploy_data.container_context or {}
+        cpu = container_context.get("cpu", self.cpu)
+        memory = container_context.get("memory", self.memory)
+
+        # Get agent ID for tracking
+        agent_id = self._instance.instance_uuid if hasattr(self, '_instance') and self._instance else None
+
+        # Create Container App configuration
+        container_app = ContainerApp(
+            location=self.location,
+            managed_environment_id=self.environment_id,
+            configuration=Configuration(
+                # Enable ingress for gRPC communication
+                ingress=Ingress(
+                    external=False,  # Internal only
+                    target_port=4000,  # Standard Dagster gRPC port
+                    transport="tcp",  # gRPC uses TCP
+                ),
+                secrets=[],
+                active_revisions_mode="Single",
+            ),
+            template=Template(
+                containers=[
+                    Container(
+                        name="code-server",
+                        image=image,
+                        resources=ContainerResources(
+                            cpu=cpu,
+                            memory=memory
+                        ),
+                        env=env_vars,
+                    )
+                ],
+                scale=Scale(
+                    min_replicas=1,
+                    max_replicas=1,
+                    rules=[]
+                )
+            ),
+            tags={
+                "dagster-deployment": deployment_name,
+                "dagster-location": location_name,
+                "dagster-component": "code-server",
+                "managed-by": "dagster-cloud-agent",
+                "dagster-agent-id": agent_id or "unknown",
+                "dagster-update-timestamp": str(desired_entry.update_timestamp),
+            }
+        )
+
+        try:
+            # Start the Container App creation (async operation)
+            poller = self.aca_client.container_apps.begin_create_or_update(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name,
+                container_app_envelope=container_app
+            )
+
+            # Wait for the initial creation to start
+            # (We'll wait for full readiness in _wait_for_new_server_ready)
+            result = poller.result(timeout=180)
+
+            logger.info(
+                f"Server spinup started: {app_name} "
+                f"(provisioning_state={result.provisioning_state})"
+            )
+
+            # Create server handle
+            server_handle = AcaServerHandle(
+                app_name=app_name,
+                deployment_name=deployment_name,
+                location_name=location_name,
+                agent_id=agent_id,
+                update_timestamp=desired_entry.update_timestamp
+            )
+
+            # Get the Container App's FQDN for gRPC endpoint
+            # The FQDN format is: <app-name>.<env-domain>
+            app = self.aca_client.container_apps.get(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name
+            )
+
+            # Use the app's FQDN if available, otherwise use app name
+            host = app.configuration.ingress.fqdn if (
+                app.configuration and
+                app.configuration.ingress and
+                app.configuration.ingress.fqdn
+            ) else app_name
+
+            server_endpoint = ServerEndpoint(
+                host=host,
+                port=4000,
+                socket=None,
+            )
+
+            return DagsterCloudGrpcServer(
+                server_handle=server_handle,
+                server_endpoint=server_endpoint,
+                code_location_deploy_data=code_location_deploy_data
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to start server spinup for {app_name}: {e}")
+            raise
+
+    async def _wait_for_new_server_ready(
+        self,
+        deployment_name: str,
+        location_name: str,
+        desired_entry: UserCodeLauncherEntry,
+        server_handle: AcaServerHandle,
+        server_endpoint: ServerEndpoint,
+    ) -> None:
+        """
+        Wait for a newly-created server to be ready to serve requests.
+
+        This polls the Container App status until it's running and healthy.
+        """
+        logger.info(
+            f"Waiting for server to be ready: {server_handle.app_name} "
+            f"at {server_endpoint.host}:{server_endpoint.port}"
+        )
+
+        max_attempts = 60  # 5 minutes with 5-second intervals
+        attempt = 0
+
+        while attempt < max_attempts:
+            try:
+                # Check Container App status
+                app = self.aca_client.container_apps.get(
+                    resource_group_name=self.resource_group,
+                    container_app_name=server_handle.app_name
+                )
+
+                # Check if app is provisioned and running
+                if (app.provisioning_state == "Succeeded" and
+                    hasattr(app, 'running_status') and
+                    app.running_status == "Running"):
+
+                    # Try to connect to the gRPC server
+                    try:
+                        client = server_endpoint.create_client()
+                        # Simple health check - try to list repositories
+                        await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: client.health_check_query(timeout=10)
+                        )
+                        logger.info(
+                            f"Server is ready: {server_handle.app_name}"
+                        )
+                        return
+                    except Exception as e:
+                        logger.debug(
+                            f"Server not yet responding to gRPC (attempt {attempt + 1}): {e}"
+                        )
+
+                # Still provisioning or starting up
+                logger.debug(
+                    f"Server not ready yet (attempt {attempt + 1}): "
+                    f"provisioning_state={app.provisioning_state}, "
+                    f"running_status={getattr(app, 'running_status', 'Unknown')}"
+                )
+
+            except Exception as e:
+                logger.debug(
+                    f"Error checking server status (attempt {attempt + 1}): {e}"
+                )
+
+            attempt += 1
+            await asyncio.sleep(5)
+
+        raise TimeoutError(
+            f"Server {server_handle.app_name} did not become ready within "
+            f"{max_attempts * 5} seconds"
+        )
+
+    def get_agent_id_for_server(self, handle: AcaServerHandle) -> Optional[str]:
+        """
+        Returns the agent_id that created a particular gRPC server.
+        """
+        return handle.agent_id
+
+    def get_code_server_resource_limits(
+        self, deployment_name: str, location_name: str
+    ) -> CloudContainerResourceLimits:
+        """
+        Return the resource limits for a code server.
+
+        For ACA, we return empty limits as ACA manages resources differently.
+        """
+        # ACA doesn't use the same resource limit structure as ECS/K8s
+        # Return an empty CloudContainerResourceLimits
+        return CloudContainerResourceLimits()
+
+    def get_server_create_timestamp(self, handle: AcaServerHandle) -> Optional[float]:
+        """
+        Returns the update_timestamp value from the given code server.
+        """
+        return handle.update_timestamp
+
+    @property
+    def requires_images(self) -> bool:
+        """
+        Whether this launcher requires container images.
+
+        Azure Container Apps always require images.
+        """
+        return True
+
+    def run_launcher(self) -> DefaultRunLauncher:
+        """
+        Return the run launcher to use for executing runs.
+
+        Uses the default run launcher which executes runs in the code server process.
+        """
+        return DefaultRunLauncher()
+
+    @property
+    def user_code_deployment_type(self) -> UserCodeDeploymentType:
+        """
+        Return the deployment type for telemetry/reporting.
+
+        We use DOCKER as the closest match for Container Apps.
+        """
+        return UserCodeDeploymentType.DOCKER
