@@ -233,7 +233,7 @@
                 { "name": "AGENT_NAME", "value": "[parameters('containerAppName')]" },
                 { "name": "DAGSTER_CLOUD_URL", "value": "https://dagster.cloud" },
                 { "name": "KEY_VAULT_URI", "value": "[concat('https://', parameters('keyVaultName'), '.vault.azure.net/')]" },
-                { "name": "KEY_VAULT_SECRET_NAMES", "value": "[join(concat(array(concat(parameters('dagsterCloudApiTokenSecretName'), ':DAGSTER_CLOUD_API_TOKEN')), parameters('keyVaultSecretNames'), if(equals(parameters('dagsterDeploymentNameSecretName'), ''), array(), array(concat(parameters('dagsterDeploymentNameSecretName'), ':DAGSTER_CLOUD_DEPLOYMENT_NAME'))), if(equals(parameters('dagsterOrgIdSecretName'), ''), array(), array(concat(parameters('dagsterOrgIdSecretName'), ':DAGSTER_CLOUD_ORG_ID')))), ',')] },
+                { "name": "KEY_VAULT_SECRET_NAMES", "value": "[join(concat(array(concat(parameters('dagsterCloudApiTokenSecretName'), ':DAGSTER_CLOUD_API_TOKEN')), parameters('keyVaultSecretNames'), if(equals(parameters('dagsterDeploymentNameSecretName'), ''), array(), array(concat(parameters('dagsterDeploymentNameSecretName'), ':DAGSTER_CLOUD_DEPLOYMENT_NAME'))), if(equals(parameters('dagsterOrgIdSecretName'), ''), array(), array(concat(parameters('dagsterOrgIdSecretName'), ':DAGSTER_CLOUD_ORG_ID')))), ','))]" },
                 { "name": "DAGSTER_CLOUD_DEPLOYMENT_NAME", "value": "[parameters('dagsterDeploymentName')]" },
                 { "name": "DAGSTER_CLOUD_ORG_ID", "value": "[parameters('dagsterOrgId')]" },
                 { "name": "AGENT_METRICS_ENABLED", "value": "[toLower(string(parameters('agentMetricsEnabled')))]" },
