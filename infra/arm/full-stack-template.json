@@ -512,6 +512,22 @@
                 {
                   "name": "CODE_SERVER_METRICS_ENABLED",
                   "value": "[toLower(string(parameters('codeServerMetricsEnabled')))]"
+                },
+                {
+                  "name": "AZURE_SUBSCRIPTION_ID",
+                  "value": "[subscription().subscriptionId]"
+                },
+                {
+                  "name": "AGENT_RESOURCE_GROUP",
+                  "value": "[resourceGroup().name]"
+                },
+                {
+                  "name": "AZURE_LOCATION",
+                  "value": "[parameters('location')]"
+                },
+                {
+                  "name": "ENVIRONMENT_NAME",
+                  "value": "[parameters('environmentName')]"
                 }
               ]
             }
