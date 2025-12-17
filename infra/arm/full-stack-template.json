@@ -14,7 +14,7 @@
     "containerAppName": { "type": "string", "defaultValue": "dagster-aca-agent", "metadata": { "displayName": "Container App Name", "description": "Name of the Container App that will run the agent.", "group": "Configuration" } },
     "agentImage": { "type": "string", "metadata": { "displayName": "Agent Image", "description": "Docker image URL for the custom Dagster agent with ACA launcher. Example: ghcr.io/username/dagster-aca-agent:latest", "group": "Configuration" } },
     "enableNatGateway": { "type": "bool", "defaultValue": false },
-    "agentCpu": { "type": "number", "defaultValue": 0.25, "metadata": { "displayName": "Agent vCPU", "description": "vCPU for the agent container (use Azure-native fractional CPUs, e.g. 0.25, 0.5, 1).", "group": "Compute" } },
+    "agentCpu": { "type": "string", "defaultValue": "0.25", "metadata": { "displayName": "Agent vCPU", "description": "vCPU for the agent container (use Azure-native fractional CPUs, e.g. 0.25, 0.5, 1).", "group": "Compute" } },
     "agentMemory": { "type": "string", "defaultValue": "1.0Gi", "metadata": { "displayName": "Agent Memory", "description": "Memory for the agent container expressed in Gi/Mi (e.g. '1.0Gi').", "group": "Compute" } },
     "numReplicas": { "type": "int", "defaultValue": 1, "minValue": 1, "maxValue": 5, "metadata": { "displayName": "Num Replicas", "description": "Number of identical agent replicas to keep running (1-5).", "group": "Compute" } },
     "agentMetricsEnabled": { "type": "bool", "defaultValue": false, "metadata": { "displayName": "Enable Agent Metrics", "description": "Allow the agent to send metrics to Dagster Cloud.", "group": "Monitoring" } },
