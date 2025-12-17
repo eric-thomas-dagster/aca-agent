@@ -88,10 +88,10 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
             inst_data: ConfigurableClassData instance (for Dagster serialization)
             **kwargs: Configuration parameters from dagster.yaml
         """
-        # Initialize parent class first
-        super().__init__(inst_data)
-
         self._inst_data = inst_data
+
+        # Initialize attributes expected by parent class
+        self._reconcile_grpc_metadata_thread = None
 
         # Extract config from inst_data or use kwargs directly
         config = inst_data.config_dict if inst_data else kwargs
