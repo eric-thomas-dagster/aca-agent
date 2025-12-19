@@ -15,7 +15,7 @@ param logAnalyticsName string = 'dagster-logs'
 param vnetName string = 'dagster-vnet'
 param vnetPrefix string = '10.1.0.0/16'
 param subnetName string = 'aca-subnet'
-param subnetPrefix string = '10.1.1.0/24'
+param subnetPrefix string = '10.1.0.0/23'
 @metadata({ displayName: 'Managed Identity', description: 'User-assigned managed identity the agent will use.', group: 'Configuration' })
 param managedIdentityName string = 'dagster-agent-identity'
 @metadata({ displayName: 'Key Vault', description: 'Name for the Azure Key Vault used to store secrets.', group: 'Secrets' })
@@ -59,6 +59,8 @@ param agentMetricsEnabled bool = false
 param codeServerMetricsEnabled bool = false
 @metadata({ displayName: 'Zero Downtime Deploys', description: 'When true, Container Apps will keep old revisions running until the new one is healthy.', group: 'Deployment' })
 param enableZeroDowntimeDeploys bool = false
+@metadata({ displayName: 'ACR Resource ID', description: 'Optional: Resource ID of Azure Container Registry to grant pull access. Example: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerRegistry/registries/{name}', group: 'Configuration' })
+param acrResourceId string = ''
 
 resource vnet 'Microsoft.Network/virtualNetworks@2020-11-01' = {
   name: vnetName
@@ -156,6 +158,19 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2020-11-01' = {
   properties: {
     securityRules: [
       {
+        name: 'AllowIntraSubnet'
+        properties: {
+          protocol: '*'
+          sourcePortRange: '*'
+          destinationPortRange: '*'
+          sourceAddressPrefix: subnetPrefix
+          destinationAddressPrefix: subnetPrefix
+          access: 'Allow'
+          direction: 'Inbound'
+          priority: 100
+        }
+      }
+      {
         name: 'AllowOutbound'
         properties: {
           protocol: '*'
@@ -180,6 +195,14 @@ resource subnet 'Microsoft.Network/virtualNetworks/subnets@2020-11-01' = {
     addressPrefix: subnetPrefix
     networkSecurityGroup: { id: nsg.id }
     natGateway: enableNatGateway ? { id: natGw.id } : null
+    delegations: [
+      {
+        name: 'Microsoft.App.environments'
+        properties: {
+          serviceName: 'Microsoft.App/environments'
+        }
+      }
+    ]
   }
 }
 
@@ -216,6 +239,11 @@ resource containerApp 'Microsoft.App/containerApps@2022-03-01' = {
               { name: 'AGENT_RESOURCE_GROUP', value: resourceGroup().name }
               { name: 'ENVIRONMENT_NAME', value: environmentName }
               { name: 'AZURE_LOCATION', value: location }
+              // Managed Identity configuration for Azure SDK authentication
+              { name: 'AZURE_CLIENT_ID', value: reference(identity.id, '2018-11-30').clientId }
+              { name: 'AZURE_TENANT_ID', value: subscription().tenantId }
+              // Code server identity - reuses agent identity for simplicity
+              { name: 'CODE_SERVER_IDENTITY_ID', value: identity.id }
             ]
         }
       ]
@@ -235,17 +263,33 @@ resource roleAssigns 'Microsoft.Authorization/roleAssignments@2020-04-01-preview
   }
 }]
 
-// NOTE: Code servers are deployed as Container Apps in the SAME environment as the agent.
-// The managed identity already has permissions to create Container Apps in this resource group.
+// Grant Contributor role to agent identity on the resource group
+// This allows the agent to create and manage Container Apps for code servers
+resource contributorRoleAssignment 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
+  name: guid(subscription().id, resourceGroup().name, managedIdentityName, 'Contributor')
+  scope: resourceGroup()
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')
+    principalId: reference(identity.id, '2018-11-30').principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// NOTE: ACR Access
+// If using ACR, grant AcrPull role to the agent identity after deployment:
+//   IDENTITY_ID=$(az deployment group show -g <rg> -n <deployment> --query properties.outputs.agentIdentityPrincipalId.value -o tsv)
+//   az role assignment create --assignee $IDENTITY_ID --role AcrPull --scope <acrResourceId>
 //
-// Optional: If using private ACR, assign AcrPull role:
-//   IDENTITY_ID=$(az identity show -n ${managedIdentityName} -g ${resourceGroup().name} --query principalId -o tsv)
-//   az role assignment create --assignee $IDENTITY_ID --role AcrPull --scope /subscriptions/${subscription().subscriptionId}/resourceGroups/{acrResourceGroup}/providers/Microsoft.ContainerRegistry/registries/{acrName}
+// (Role assignment not included in template because it requires permissions on the ACR's resource group)
+
+// NOTE: Code servers are deployed as Container Apps in the SAME environment as the agent.
+// - Agent identity: Has Contributor role to create/manage Container Apps + needs AcrPull for images
+// - Code servers: Reuse the agent identity (assigned via CODE_SERVER_IDENTITY_ID)
 
 output containerAppResourceId string = containerApp.id
 output managedEnvironmentId string = env.id
 output environmentName string = environmentName
 output keyVaultUri string = 'https://${keyVaultName}.vault.azure.net/'
-output identityResourceId string = identity.id
-output identityPrincipalId string = reference(identity.id, '2018-11-30').principalId
+output agentIdentityResourceId string = identity.id
+output agentIdentityPrincipalId string = reference(identity.id, '2018-11-30').principalId
 output subnetResourceId string = subnet.id

@@ -43,7 +43,7 @@
     },
     "subnetPrefix": {
       "type": "string",
-      "defaultValue": "10.1.1.0/24"
+      "defaultValue": "10.1.0.0/23"
     },
     "managedIdentityName": {
       "type": "string",
@@ -238,13 +238,42 @@
         "description": "Tags to apply to all resources (required: Department tag)",
         "group": "Configuration"
       }
+    },
+    "acrName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "displayName": "ACR Name",
+        "description": "Optional: Name of Azure Container Registry for code location images. Leave empty to skip ACR setup.",
+        "group": "Configuration"
+      }
+    },
+    "createAcr": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "displayName": "Create ACR",
+        "description": "If true and acrName is provided, creates a new Azure Container Registry. If false, uses existing ACR with the specified name.",
+        "group": "Configuration"
+      }
+    },
+    "acrSku": {
+      "type": "string",
+      "defaultValue": "Standard",
+      "allowedValues": ["Basic", "Standard", "Premium"],
+      "metadata": {
+        "displayName": "ACR SKU",
+        "description": "SKU/pricing tier for Azure Container Registry (only used if createAcr is true)",
+        "group": "Configuration"
+      }
     }
   },
   "variables": {
     "subnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]",
     "logAnalyticsId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]",
     "identityId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]",
-    "keyVaultId": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+    "keyVaultId": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+    "acrId": "[if(not(equals(parameters('acrName'), '')), resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '')]"
   },
   "resources": [
     {
@@ -252,20 +281,15 @@
       "apiVersion": "2020-11-01",
       "name": "[parameters('vnetName')]",
       "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', concat(parameters('vnetName'), '-nsg'))]"
+      ],
       "properties": {
         "addressSpace": {
           "addressPrefixes": [
             "[parameters('vnetPrefix')]"
           ]
-        },
-        "subnets": [
-          {
-            "name": "[parameters('subnetName')]",
-            "properties": {
-              "addressPrefix": "[parameters('subnetPrefix')]"
-            }
-          }
-        ]
+        }
       },
       "tags": "[parameters('resourceTags')]"
     },
@@ -282,6 +306,21 @@
       "apiVersion": "2018-11-30",
       "name": "[parameters('managedIdentityName')]",
       "location": "[parameters('location')]",
+      "tags": "[parameters('resourceTags')]"
+    },
+    {
+      "condition": "[and(parameters('createAcr'), not(equals(parameters('acrName'), '')))]",
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2023-01-01-preview",
+      "name": "[parameters('acrName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "[parameters('acrSku')]"
+      },
+      "properties": {
+        "adminUserEnabled": false,
+        "publicNetworkAccess": "Enabled"
+      },
       "tags": "[parameters('resourceTags')]"
     },
     {
@@ -392,6 +431,19 @@
       "properties": {
         "securityRules": [
           {
+            "name": "AllowIntraSubnet",
+            "properties": {
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "*",
+              "sourceAddressPrefix": "[parameters('subnetPrefix')]",
+              "destinationAddressPrefix": "[parameters('subnetPrefix')]",
+              "access": "Allow",
+              "direction": "Inbound",
+              "priority": 100
+            }
+          },
+          {
             "name": "AllowOutbound",
             "properties": {
               "protocol": "*",
@@ -413,24 +465,21 @@
       "apiVersion": "2020-11-01",
       "name": "[concat(parameters('vnetName'), '/', parameters('subnetName'))]",
       "dependsOn": [
-        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]",
-        "[resourceId('Microsoft.Network/networkSecurityGroups', concat(parameters('vnetName'), '-nsg'))]"
+        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
       ],
       "properties": {
-        "addressPrefix": "[parameters('subnetPrefix')]",
-        "networkSecurityGroup": {
-          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', concat(parameters('vnetName'), '-nsg'))]"
-        }
+        "addressPrefix": "[parameters('subnetPrefix')]"
       }
     },
     {
       "type": "Microsoft.App/managedEnvironments",
-      "apiVersion": "2022-03-01",
+      "apiVersion": "2023-05-01",
       "name": "[parameters('environmentName')]",
       "location": "[parameters('location')]",
       "dependsOn": [
         "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]",
-        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]"
       ],
       "properties": {
         "appLogsConfiguration": {
@@ -441,14 +490,14 @@
           }
         },
         "vnetConfiguration": {
-          "infrastructureSubnetResourceId": "[variables('subnetId')]"
+          "infrastructureSubnetId": "[variables('subnetId')]"
         }
       },
       "tags": "[parameters('resourceTags')]"
     },
     {
       "type": "Microsoft.App/containerApps",
-      "apiVersion": "2022-03-01",
+      "apiVersion": "2023-05-01",
       "name": "[parameters('containerAppName')]",
       "location": "[parameters('location')]",
       "dependsOn": [
@@ -528,6 +577,18 @@
                 {
                   "name": "ENVIRONMENT_NAME",
                   "value": "[parameters('environmentName')]"
+                },
+                {
+                  "name": "AZURE_CLIENT_ID",
+                  "value": "[reference(variables('identityId'), '2018-11-30').clientId]"
+                },
+                {
+                  "name": "AZURE_TENANT_ID",
+                  "value": "[subscription().tenantId]"
+                },
+                {
+                  "name": "CODE_SERVER_IDENTITY_ID",
+                  "value": "[variables('identityId')]"
                 }
               ]
             }
@@ -559,6 +620,36 @@
         "scope": "[parameters('additionalRoleAssignments')[copyIndex()].scope]"
       },
       "tags": "[parameters('resourceTags')]"
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2020-04-01-preview",
+      "name": "[guid(subscription().id, resourceGroup().name, parameters('managedIdentityName'), 'Contributor')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').principalId]",
+        "principalType": "ServicePrincipal"
+      },
+      "tags": "[parameters('resourceTags')]"
+    },
+    {
+      "condition": "[not(equals(parameters('acrName'), ''))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2020-04-01-preview",
+      "name": "[guid(resourceGroup().id, parameters('managedIdentityName'), 'AcrPull')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]",
+        "[variables('acrId')]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').principalId]",
+        "principalType": "ServicePrincipal"
+      },
+      "comments": "Grants AcrPull role at resource group level, giving access to all ACRs in the resource group"
     }
   ],
   "outputs": {
@@ -578,9 +669,21 @@
       "type": "string",
       "value": "[variables('identityId')]"
     },
+    "agentIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').principalId]"
+    },
     "subnetResourceId": {
       "type": "string",
       "value": "[variables('subnetId')]"
+    },
+    "acrLoginServer": {
+      "type": "string",
+      "value": "[if(not(equals(parameters('acrName'), '')), reference(variables('acrId'), '2023-01-01-preview').loginServer, '')]"
+    },
+    "acrResourceId": {
+      "type": "string",
+      "value": "[variables('acrId')]"
     }
   }
 }

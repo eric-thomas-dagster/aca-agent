@@ -1,4 +1,4 @@
-FROM dagster/dagster-cloud-agent:latest
+FROM dagster/dagster-cloud-agent:1.12.6
 
 # Add Azure Key Vault support and our small entrypoint helper
 COPY app /app

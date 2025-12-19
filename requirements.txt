@@ -1,7 +1,3 @@
-# Dagster Cloud Agent
-dagster
-dagster-cloud
-
 # Azure SDKs for authentication and Key Vault
 azure-identity>=1.15.0
 azure-keyvault-secrets>=4.7.0
@@ -11,6 +7,3 @@ azure-mgmt-appcontainers>=2.0.0
 
 # Azure SDK for Resource Management (helper functions)
 azure-mgmt-resource>=23.0.0
-
-# General utilities
-requests>=2.31.0
