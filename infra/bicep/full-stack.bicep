@@ -1,13 +1,13 @@
 param location string = resourceGroup().location
 @metadata({
-  displayName: 'Container Apps Environment',
-  description: 'Name for the Container Apps managed environment.',
+  displayName: 'Container Apps Environment'
+  description: 'Name for the Container Apps managed environment.'
   group: 'Configuration'
 })
 param environmentName string = 'dagster-aca-env'
 @metadata({
-  displayName: 'Log Analytics Workspace',
-  description: 'Name of the Log Analytics workspace for Container Apps logs.',
+  displayName: 'Log Analytics Workspace'
+  description: 'Name of the Log Analytics workspace for Container Apps logs.'
   group: 'Configuration'
 })
 param logAnalyticsName string = 'dagster-logs'
@@ -48,7 +48,7 @@ param dagsterDeploymentNameSecretValue string = ''
 @metadata({ displayName: 'Organization ID (value)', description: 'Optional organization ID value to store in Key Vault (if dagsterOrgIdSecretName is provided).', group: 'Secrets' })
 param dagsterOrgIdSecretValue string = ''
 @metadata({ displayName: 'Agent vCPU', description: 'vCPU for the agent container (use Azure-native fractional CPUs, e.g. 0.25, 0.5, 1).', group: 'Compute' })
-param agentCpu number = 0.25
+param agentCpu string = '0.25'
 @metadata({ displayName: 'Agent Memory', description: 'Memory for the agent container expressed in Gi/Mi (e.g. \'1.0Gi\').', group: 'Compute' })
 param agentMemory string = '1.0Gi'
 @metadata({ displayName: 'Num Replicas', description: 'Number of identical agent replicas to keep running (1-5).', group: 'Compute' })
@@ -189,7 +189,7 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2020-11-01' = {
 
 // create subnet separately so we can attach nat gateway and nsg
 resource subnet 'Microsoft.Network/virtualNetworks/subnets@2020-11-01' = {
-  name: '${vnetName}/${subnetName}'
+  name: subnetName
   parent: vnet
   properties: {
     addressPrefix: subnetPrefix
@@ -224,7 +224,7 @@ resource containerApp 'Microsoft.App/containerApps@2022-03-01' = {
         {
           name: 'dagster-agent'
           image: agentImage
-          resources: { cpu: agentCpu, memory: agentMemory }
+          resources: { cpu: json(agentCpu), memory: agentMemory }
           env: [
               { name: 'AGENT_NAME', value: containerAppName }
               { name: 'DAGSTER_CLOUD_URL', value: 'https://dagster.cloud' }
@@ -255,7 +255,7 @@ resource containerApp 'Microsoft.App/containerApps@2022-03-01' = {
 // role assignments
 var assignments = additionalRoleAssignments
 resource roleAssigns 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = [for (assignment, i) in assignments: {
-  name: guid(subscription().id, resourceGroup().name, managedIdentityName, i)
+  name: guid(subscription().id, resourceGroup().name, managedIdentityName, string(i))
   properties: {
     roleDefinitionId: assignment.roleDefinitionId
     principalId: reference(identity.id, '2018-11-30').principalId

@@ -1,15 +1,17 @@
 {
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.39.26.7824",
+      "templateHash": "15847050254713844588"
+    }
+  },
   "parameters": {
     "location": {
       "type": "string",
-      "defaultValue": "eastus",
-      "metadata": {
-        "displayName": "Location",
-        "description": "Azure location to deploy resources into.",
-        "group": "Configuration"
-      }
+      "defaultValue": "[resourceGroup().location]"
     },
     "environmentName": {
       "type": "string",
@@ -31,7 +33,12 @@
     },
     "vnetName": {
       "type": "string",
-      "defaultValue": "dagster-vnet"
+      "defaultValue": "dagster-vnet",
+      "metadata": {
+        "displayName": "Virtual Network",
+        "description": "Name of the VNet to create or use.",
+        "group": "Network"
+      }
     },
     "vnetPrefix": {
       "type": "string",
@@ -84,68 +91,9 @@
       "type": "bool",
       "defaultValue": false
     },
-    "agentCpu": {
-      "type": "string",
-      "defaultValue": "0.5",
-      "metadata": {
-        "displayName": "Agent vCPU",
-        "description": "vCPU for the agent container. Valid combinations: 0.25=0.5Gi, 0.5=1.0Gi, 0.75=1.5Gi, 1.0=2.0Gi",
-        "group": "Compute"
-      }
-    },
-    "agentMemory": {
-      "type": "string",
-      "defaultValue": "1.0Gi",
-      "metadata": {
-        "displayName": "Agent Memory",
-        "description": "Memory for the agent container expressed in Gi/Mi (e.g. '1.0Gi').",
-        "group": "Compute"
-      }
-    },
-    "numReplicas": {
-      "type": "int",
-      "defaultValue": 1,
-      "minValue": 1,
-      "maxValue": 5,
-      "metadata": {
-        "displayName": "Num Replicas",
-        "description": "Number of identical agent replicas to keep running (1-5).",
-        "group": "Compute"
-      }
-    },
-    "agentMetricsEnabled": {
-      "type": "bool",
-      "defaultValue": false,
-      "metadata": {
-        "displayName": "Enable Agent Metrics",
-        "description": "Allow the agent to send metrics to Dagster Cloud.",
-        "group": "Monitoring"
-      }
-    },
-    "codeServerMetricsEnabled": {
-      "type": "bool",
-      "defaultValue": false,
-      "metadata": {
-        "displayName": "Enable Code Server Metrics",
-        "description": "Allow code server metrics to be reported to Dagster Cloud.",
-        "group": "Monitoring"
-      }
-    },
-    "enableZeroDowntimeDeploys": {
-      "type": "bool",
-      "defaultValue": false,
-      "metadata": {
-        "displayName": "Zero Downtime Deploys",
-        "description": "When true, Container Apps will keep old revisions running until the new one is healthy.",
-        "group": "Deployment"
-      }
-    },
     "additionalRoleAssignments": {
       "type": "array",
-      "defaultValue": [],
-      "metadata": {
-        "description": "Array of objects {roleDefinitionId: string, scope: string} to assign to the managed identity"
-      }
+      "defaultValue": []
     },
     "keyVaultSecretNames": {
       "type": "array",
@@ -226,54 +174,72 @@
         "group": "Secrets"
       }
     },
-    "resourceTags": {
-      "type": "object",
-      "defaultValue": {
-        "Department": "Engineering",
-        "Application": "Dagster",
-        "ManagedBy": "ARM-Template"
-      },
-      "metadata": {
-        "displayName": "Resource Tags",
-        "description": "Tags to apply to all resources (required: Department tag)",
-        "group": "Configuration"
-      }
-    },
-    "acrName": {
+    "agentCpu": {
       "type": "string",
-      "defaultValue": "",
+      "defaultValue": "0.25",
       "metadata": {
-        "displayName": "ACR Name",
-        "description": "Optional: Name of Azure Container Registry for code location images. Leave empty to skip ACR setup.",
-        "group": "Configuration"
+        "displayName": "Agent vCPU",
+        "description": "vCPU for the agent container (use Azure-native fractional CPUs, e.g. 0.25, 0.5, 1).",
+        "group": "Compute"
       }
     },
-    "createAcr": {
+    "agentMemory": {
+      "type": "string",
+      "defaultValue": "1.0Gi",
+      "metadata": {
+        "displayName": "Agent Memory",
+        "description": "Memory for the agent container expressed in Gi/Mi (e.g. '1.0Gi').",
+        "group": "Compute"
+      }
+    },
+    "numReplicas": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "displayName": "Num Replicas",
+        "description": "Number of identical agent replicas to keep running (1-5).",
+        "group": "Compute"
+      }
+    },
+    "agentMetricsEnabled": {
       "type": "bool",
       "defaultValue": false,
       "metadata": {
-        "displayName": "Create ACR",
-        "description": "If true and acrName is provided, creates a new Azure Container Registry. If false, uses existing ACR with the specified name.",
-        "group": "Configuration"
+        "displayName": "Enable Agent Metrics",
+        "description": "Allow the agent to send metrics to Dagster Cloud.",
+        "group": "Monitoring"
       }
     },
-    "acrSku": {
-      "type": "string",
-      "defaultValue": "Standard",
-      "allowedValues": ["Basic", "Standard", "Premium"],
+    "codeServerMetricsEnabled": {
+      "type": "bool",
+      "defaultValue": false,
       "metadata": {
-        "displayName": "ACR SKU",
-        "description": "SKU/pricing tier for Azure Container Registry (only used if createAcr is true)",
+        "displayName": "Enable Code Server Metrics",
+        "description": "Allow code server metrics to be reported to Dagster Cloud.",
+        "group": "Monitoring"
+      }
+    },
+    "enableZeroDowntimeDeploys": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "displayName": "Zero Downtime Deploys",
+        "description": "When true, Container Apps will keep old revisions running until the new one is healthy.",
+        "group": "Deployment"
+      }
+    },
+    "acrResourceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "displayName": "ACR Resource ID",
+        "description": "Optional: Resource ID of Azure Container Registry to grant pull access. Example: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerRegistry/registries/{name}",
         "group": "Configuration"
       }
     }
   },
   "variables": {
-    "subnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]",
-    "logAnalyticsId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]",
-    "identityId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]",
-    "keyVaultId": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
-    "acrId": "[if(not(equals(parameters('acrName'), '')), resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '')]"
+    "assignments": "[parameters('additionalRoleAssignments')]"
   },
   "resources": [
     {
@@ -281,57 +247,31 @@
       "apiVersion": "2020-11-01",
       "name": "[parameters('vnetName')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Network/networkSecurityGroups', concat(parameters('vnetName'), '-nsg'))]"
-      ],
       "properties": {
         "addressSpace": {
           "addressPrefixes": [
             "[parameters('vnetPrefix')]"
           ]
         }
-      },
-      "tags": "[parameters('resourceTags')]"
+      }
     },
     {
       "type": "Microsoft.OperationalInsights/workspaces",
       "apiVersion": "2020-08-01",
       "name": "[parameters('logAnalyticsName')]",
-      "location": "[parameters('location')]",
-      "properties": {},
-      "tags": "[parameters('resourceTags')]"
+      "location": "[parameters('location')]"
     },
     {
       "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
       "apiVersion": "2018-11-30",
       "name": "[parameters('managedIdentityName')]",
-      "location": "[parameters('location')]",
-      "tags": "[parameters('resourceTags')]"
-    },
-    {
-      "condition": "[and(parameters('createAcr'), not(equals(parameters('acrName'), '')))]",
-      "type": "Microsoft.ContainerRegistry/registries",
-      "apiVersion": "2023-01-01-preview",
-      "name": "[parameters('acrName')]",
-      "location": "[parameters('location')]",
-      "sku": {
-        "name": "[parameters('acrSku')]"
-      },
-      "properties": {
-        "adminUserEnabled": false,
-        "publicNetworkAccess": "Enabled"
-      },
-      "tags": "[parameters('resourceTags')]"
+      "location": "[parameters('location')]"
     },
     {
       "type": "Microsoft.KeyVault/vaults",
       "apiVersion": "2019-09-01",
       "name": "[parameters('keyVaultName')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[variables('identityId')]",
-        "[variables('logAnalyticsId')]"
-      ],
       "properties": {
         "sku": {
           "family": "A",
@@ -341,7 +281,7 @@
         "accessPolicies": [
           {
             "tenantId": "[subscription().tenantId]",
-            "objectId": "[reference(variables('identityId'), '2018-11-30').principalId]",
+            "objectId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').principalId]",
             "permissions": {
               "secrets": [
                 "get",
@@ -351,82 +291,101 @@
           }
         ]
       },
-      "tags": "[parameters('resourceTags')]"
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
+      ]
     },
     {
       "type": "Microsoft.KeyVault/vaults/secrets",
       "apiVersion": "2019-09-01",
-      "name": "[concat(parameters('keyVaultName'), '/', parameters('dagsterCloudApiTokenSecretName'))]",
-      "dependsOn": [
-        "[variables('keyVaultId')]"
-      ],
+      "name": "[format('{0}/{1}', parameters('keyVaultName'), parameters('dagsterCloudApiTokenSecretName'))]",
       "properties": {
         "value": "[parameters('dagsterCloudApiToken')]"
       },
-      "tags": "[parameters('resourceTags')]"
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+      ]
     },
     {
       "condition": "[and(not(equals(parameters('dagsterDeploymentNameSecretName'), '')), not(equals(parameters('dagsterDeploymentNameSecretValue'), '')))]",
       "type": "Microsoft.KeyVault/vaults/secrets",
       "apiVersion": "2019-09-01",
-      "name": "[concat(parameters('keyVaultName'), '/', parameters('dagsterDeploymentNameSecretName'))]",
-      "dependsOn": [
-        "[variables('keyVaultId')]"
-      ],
+      "name": "[format('{0}/{1}', parameters('keyVaultName'), parameters('dagsterDeploymentNameSecretName'))]",
       "properties": {
         "value": "[parameters('dagsterDeploymentNameSecretValue')]"
       },
-      "tags": "[parameters('resourceTags')]"
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+      ]
     },
     {
       "condition": "[and(not(equals(parameters('dagsterOrgIdSecretName'), '')), not(equals(parameters('dagsterOrgIdSecretValue'), '')))]",
       "type": "Microsoft.KeyVault/vaults/secrets",
       "apiVersion": "2019-09-01",
-      "name": "[concat(parameters('keyVaultName'), '/', parameters('dagsterOrgIdSecretName'))]",
-      "dependsOn": [
-        "[variables('keyVaultId')]"
-      ],
+      "name": "[format('{0}/{1}', parameters('keyVaultName'), parameters('dagsterOrgIdSecretName'))]",
       "properties": {
         "value": "[parameters('dagsterOrgIdSecretValue')]"
       },
-      "tags": "[parameters('resourceTags')]"
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2022-03-01",
+      "name": "[parameters('environmentName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName')), '2020-08-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName')), '2020-08-01').primarySharedKey]"
+          }
+        },
+        "vnetConfiguration": {
+          "infrastructureSubnetResourceId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]"
+      ]
     },
     {
       "condition": "[parameters('enableNatGateway')]",
       "type": "Microsoft.Network/publicIPAddresses",
       "apiVersion": "2020-11-01",
-      "name": "[concat(parameters('vnetName'), '-nat-pip')]",
+      "name": "[format('{0}-nat-pip', parameters('vnetName'))]",
       "location": "[parameters('location')]",
       "properties": {
         "publicIPAllocationMethod": "Static"
       },
       "sku": {
         "name": "Standard"
-      },
-      "tags": "[parameters('resourceTags')]"
+      }
     },
     {
       "condition": "[parameters('enableNatGateway')]",
       "type": "Microsoft.Network/natGateways",
       "apiVersion": "2020-11-01",
-      "name": "[concat(parameters('vnetName'), '-natgw')]",
+      "name": "[format('{0}-natgw', parameters('vnetName'))]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Network/publicIPAddresses', concat(parameters('vnetName'), '-nat-pip'))]"
-      ],
       "properties": {
         "publicIpAddresses": [
           {
-            "id": "[resourceId('Microsoft.Network/publicIPAddresses', concat(parameters('vnetName'), '-nat-pip'))]"
+            "id": "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-nat-pip', parameters('vnetName')))]"
           }
         ]
       },
-      "tags": "[parameters('resourceTags')]"
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-nat-pip', parameters('vnetName')))]"
+      ]
     },
     {
       "type": "Microsoft.Network/networkSecurityGroups",
       "apiVersion": "2020-11-01",
-      "name": "[concat(parameters('vnetName'), '-nsg')]",
+      "name": "[format('{0}-nsg', parameters('vnetName'))]",
       "location": "[parameters('location')]",
       "properties": {
         "securityRules": [
@@ -457,61 +416,42 @@
             }
           }
         ]
-      },
-      "tags": "[parameters('resourceTags')]"
+      }
     },
     {
       "type": "Microsoft.Network/virtualNetworks/subnets",
       "apiVersion": "2020-11-01",
-      "name": "[concat(parameters('vnetName'), '/', parameters('subnetName'))]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
-      ],
+      "name": "[format('{0}/{1}', parameters('vnetName'), parameters('subnetName'))]",
       "properties": {
-        "addressPrefix": "[parameters('subnetPrefix')]"
-      }
-    },
-    {
-      "type": "Microsoft.App/managedEnvironments",
-      "apiVersion": "2023-05-01",
-      "name": "[parameters('environmentName')]",
-      "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]",
-        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]",
-        "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]"
-      ],
-      "properties": {
-        "appLogsConfiguration": {
-          "destination": "log-analytics",
-          "logAnalyticsConfiguration": {
-            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName')), '2020-08-01').customerId]",
-            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName')), '2020-08-01').primarySharedKey]"
-          }
+        "addressPrefix": "[parameters('subnetPrefix')]",
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-nsg', parameters('vnetName')))]"
         },
-        "vnetConfiguration": {
-          "infrastructureSubnetId": "[variables('subnetId')]"
-        }
+        "natGateway": "[if(parameters('enableNatGateway'), createObject('id', resourceId('Microsoft.Network/natGateways', format('{0}-natgw', parameters('vnetName')))), null())]",
+        "delegations": [
+          {
+            "name": "Microsoft.App.environments",
+            "properties": {
+              "serviceName": "Microsoft.App/environments"
+            }
+          }
+        ]
       },
-      "tags": "[parameters('resourceTags')]"
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/natGateways', format('{0}-natgw', parameters('vnetName')))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-nsg', parameters('vnetName')))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+      ]
     },
     {
       "type": "Microsoft.App/containerApps",
-      "apiVersion": "2023-05-01",
+      "apiVersion": "2022-03-01",
       "name": "[parameters('containerAppName')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
-        "[variables('identityId')]",
-        "[variables('keyVaultId')]",
-        "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), parameters('dagsterCloudApiTokenSecretName'))]",
-        "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), parameters('dagsterDeploymentNameSecretName'))]",
-        "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), parameters('dagsterOrgIdSecretName'))]"
-      ],
       "identity": {
         "type": "UserAssigned",
         "userAssignedIdentities": {
-          "[variables('identityId')]": {}
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')))]": {}
         }
       },
       "properties": {
@@ -526,7 +466,7 @@
               "name": "dagster-agent",
               "image": "[parameters('agentImage')]",
               "resources": {
-                "cpu": "[parameters('agentCpu')]",
+                "cpu": "[json(parameters('agentCpu'))]",
                 "memory": "[parameters('agentMemory')]"
               },
               "env": [
@@ -540,11 +480,11 @@
                 },
                 {
                   "name": "KEY_VAULT_URI",
-                  "value": "[concat('https://', parameters('keyVaultName'), '.vault.azure.net/')]"
+                  "value": "[format('https://{0}.vault.azure.net/', parameters('keyVaultName'))]"
                 },
                 {
                   "name": "KEY_VAULT_SECRET_NAMES",
-                  "value": "[join(concat(array(concat(parameters('dagsterCloudApiTokenSecretName'), ':DAGSTER_CLOUD_API_TOKEN')), parameters('keyVaultSecretNames'), if(equals(parameters('dagsterDeploymentNameSecretName'), ''), array(), array(concat(parameters('dagsterDeploymentNameSecretName'), ':DAGSTER_CLOUD_DEPLOYMENT_NAME'))), if(equals(parameters('dagsterOrgIdSecretName'), ''), array(), array(concat(parameters('dagsterOrgIdSecretName'), ':DAGSTER_CLOUD_ORG_ID')))), ',')]"
+                  "value": "[join(concat(createArray(format('{0}:DAGSTER_CLOUD_API_TOKEN', parameters('dagsterCloudApiTokenSecretName'))), parameters('keyVaultSecretNames'), if(not(equals(parameters('dagsterDeploymentNameSecretName'), '')), createArray(format('{0}:DAGSTER_CLOUD_DEPLOYMENT_NAME', parameters('dagsterDeploymentNameSecretName'))), createArray()), if(not(equals(parameters('dagsterOrgIdSecretName'), '')), createArray(format('{0}:DAGSTER_CLOUD_ORG_ID', parameters('dagsterOrgIdSecretName'))), createArray())), ',')]"
                 },
                 {
                   "name": "DAGSTER_CLOUD_DEPLOYMENT_NAME",
@@ -571,16 +511,16 @@
                   "value": "[resourceGroup().name]"
                 },
                 {
-                  "name": "AZURE_LOCATION",
-                  "value": "[parameters('location')]"
-                },
-                {
                   "name": "ENVIRONMENT_NAME",
                   "value": "[parameters('environmentName')]"
                 },
                 {
+                  "name": "AZURE_LOCATION",
+                  "value": "[parameters('location')]"
+                },
+                {
                   "name": "AZURE_CLIENT_ID",
-                  "value": "[reference(variables('identityId'), '2018-11-30').clientId]"
+                  "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').clientId]"
                 },
                 {
                   "name": "AZURE_TENANT_ID",
@@ -588,7 +528,7 @@
                 },
                 {
                   "name": "CODE_SERVER_IDENTITY_ID",
-                  "value": "[variables('identityId')]"
+                  "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
                 }
               ]
             }
@@ -599,57 +539,43 @@
           }
         }
       },
-      "tags": "[parameters('resourceTags')]"
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), parameters('dagsterCloudApiTokenSecretName'))]",
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), parameters('dagsterDeploymentNameSecretName'))]",
+        "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]",
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), parameters('dagsterOrgIdSecretName'))]"
+      ]
     },
     {
-      "condition": "[greater(length(parameters('additionalRoleAssignments')), 0)]",
+      "copy": {
+        "name": "roleAssigns",
+        "count": "[length(variables('assignments'))]"
+      },
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2020-04-01-preview",
-      "name": "[concat(guid(subscription().id, resourceGroup().name, parameters('managedIdentityName'), copyIndex()), '-ra')]",
-      "copy": {
-        "name": "roleAssignmentLoop",
-        "count": "[length(parameters('additionalRoleAssignments'))]"
+      "name": "[guid(subscription().id, resourceGroup().name, parameters('managedIdentityName'), string(copyIndex()))]",
+      "properties": {
+        "roleDefinitionId": "[variables('assignments')[copyIndex()].roleDefinitionId]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').principalId]",
+        "principalType": "ServicePrincipal"
       },
       "dependsOn": [
         "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
-      ],
-      "properties": {
-        "roleDefinitionId": "[parameters('additionalRoleAssignments')[copyIndex()].roleDefinitionId]",
-        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').principalId]",
-        "principalType": "ServicePrincipal",
-        "scope": "[parameters('additionalRoleAssignments')[copyIndex()].scope]"
-      },
-      "tags": "[parameters('resourceTags')]"
+      ]
     },
     {
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2020-04-01-preview",
       "name": "[guid(subscription().id, resourceGroup().name, parameters('managedIdentityName'), 'Contributor')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
-      ],
       "properties": {
         "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]",
         "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').principalId]",
         "principalType": "ServicePrincipal"
       },
-      "tags": "[parameters('resourceTags')]"
-    },
-    {
-      "condition": "[not(equals(parameters('acrName'), ''))]",
-      "type": "Microsoft.Authorization/roleAssignments",
-      "apiVersion": "2020-04-01-preview",
-      "name": "[guid(resourceGroup().id, parameters('managedIdentityName'), 'AcrPull')]",
       "dependsOn": [
-        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]",
-        "[variables('acrId')]"
-      ],
-      "properties": {
-        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
-        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').principalId]",
-        "principalType": "ServicePrincipal"
-      },
-      "comments": "Grants AcrPull role at resource group level, giving access to all ACRs in the resource group"
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
+      ]
     }
   ],
   "outputs": {
@@ -661,13 +587,17 @@
       "type": "string",
       "value": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]"
     },
+    "environmentName": {
+      "type": "string",
+      "value": "[parameters('environmentName')]"
+    },
     "keyVaultUri": {
       "type": "string",
-      "value": "[concat('https://', parameters('keyVaultName'), '.vault.azure.net/')]"
+      "value": "[format('https://{0}.vault.azure.net/', parameters('keyVaultName'))]"
     },
-    "identityResourceId": {
+    "agentIdentityResourceId": {
       "type": "string",
-      "value": "[variables('identityId')]"
+      "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
     },
     "agentIdentityPrincipalId": {
       "type": "string",
@@ -675,15 +605,7 @@
     },
     "subnetResourceId": {
       "type": "string",
-      "value": "[variables('subnetId')]"
-    },
-    "acrLoginServer": {
-      "type": "string",
-      "value": "[if(not(equals(parameters('acrName'), '')), reference(variables('acrId'), '2023-01-01-preview').loginServer, '')]"
-    },
-    "acrResourceId": {
-      "type": "string",
-      "value": "[variables('acrId')]"
+      "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]"
     }
   }
 }
