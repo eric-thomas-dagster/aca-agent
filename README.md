@@ -63,7 +63,7 @@ az deployment group create \
 
 ```
 ├── app/
-│   ├── aca_launcher.py       # Custom ACA code server launcher
+│   ├── aca_launcher.py       # Custom ACA launchers (code servers & run workers)
 │   ├── dagster.yaml          # Agent configuration
 │   └── entrypoint.py         # Fetches Key Vault secrets, starts agent
 ├── infra/
@@ -86,15 +86,37 @@ az deployment group create \
 **Components:**
 - **Agent (ACA)**: Runs 24/7, maintains connection to Dagster Cloud (~$20/month)
 - **Code Servers (ACA)**: Automatically created by agent, one per code location (~$20/month each)
-- **Jobs**: Created as separate Container Apps by code servers, scale to zero after completion
+- **Run Workers (ACA)**: Ephemeral containers created per job execution, scale to zero after completion
 
 **vs. AKS:** 53% cost savings with no cluster management overhead!
 
 **Key Features:**
 - Custom `AcaUserCodeLauncher` creates code servers in the same Container Apps Environment
-- Blue-green deployments for zero-downtime updates
+- Custom `AcaRunLauncher` creates ephemeral run workers for job execution
+- External ingress for code server communication
 - Managed identity for secure Azure resource access
 - Key Vault integration for secrets
+
+---
+
+## 📦 Code Location Requirements
+
+Your Dagster code locations (user code) must include both `dagster` and `dagster-cloud` with matching versions:
+
+```toml
+# pyproject.toml
+dependencies = [
+    "dagster==1.12.6",
+    "dagster-cloud==1.12.6",
+    # ... your other dependencies
+]
+```
+
+**Why both?**
+- `dagster`: Core framework for defining jobs and assets
+- `dagster-cloud`: Required for run execution (GraphQL storage, instance config)
+
+The versions should match the agent base image version (currently `1.12.6`).
 
 ---
 
