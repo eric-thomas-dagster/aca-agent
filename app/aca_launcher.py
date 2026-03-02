@@ -18,6 +18,8 @@ import os
 import logging
 import time
 import asyncio
+import threading
+import datetime
 from typing import Dict, Optional, List, Collection, NamedTuple
 from dagster_cloud.workspace.user_code_launcher import DagsterCloudUserCodeLauncher
 from dagster_cloud.workspace.user_code_launcher.user_code_launcher import (
@@ -85,6 +87,11 @@ class AcaRunLauncher(RunLauncher):
         self.environment_id = env.id
 
         logger.info(f"AcaRunLauncher initialized: rg={self.resource_group}, env={self.environment_name}")
+
+        # Start background thread to delete completed run Container Apps.
+        # ACA environments have a 200 Container App limit, so we must clean up
+        # run-workers that have scaled to zero after their run finishes.
+        self._start_cleanup_thread()
 
     @property
     def supports_check_run_worker_health(self) -> bool:
@@ -304,6 +311,83 @@ class AcaRunLauncher(RunLauncher):
         except Exception as e:
             logger.error(f"Failed to launch run {run_id}: {e}")
             raise
+
+    def _cleanup_completed_run_apps(self) -> int:
+        """Delete run-worker Container Apps that have scaled to zero.
+
+        ACA environments cap at 200 Container Apps. Run workers scale to
+        min_replicas=0 when done but the Container App object persists.
+        This method removes those objects so the slot is freed for future runs.
+
+        Returns the number of apps deleted.
+        """
+        min_age = datetime.timedelta(
+            seconds=int(os.getenv("RUN_APP_CLEANUP_MIN_AGE_SECS", "120"))
+        )
+        now = datetime.datetime.now(datetime.timezone.utc)
+        deleted = 0
+
+        try:
+            apps = list(self.aca_client.container_apps.list_by_resource_group(
+                resource_group_name=self.resource_group
+            ))
+            run_apps = [
+                a for a in apps
+                if (a.tags or {}).get("dagster-component") == "run-worker"
+            ]
+
+            for app in run_apps:
+                # Only touch fully provisioned apps.
+                if app.provisioning_state != "Succeeded":
+                    continue
+
+                # Respect minimum age so we don't delete an app that's still
+                # spinning up (it won't be "Running" yet either, but be safe).
+                if app.system_data and app.system_data.created_at:
+                    created = app.system_data.created_at
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=datetime.timezone.utc)
+                    if (now - created) < min_age:
+                        continue
+
+                # running_status is "Running" while the container is active.
+                # Any other value (Stopped, Degraded, etc.) means the container
+                # has exited and ACA has scaled the app to 0 replicas.
+                status = getattr(app, "running_status", None)
+                if status != "Running":
+                    logger.info(
+                        f"Deleting completed run Container App: {app.name} "
+                        f"(running_status={status})"
+                    )
+                    try:
+                        self.aca_client.container_apps.begin_delete(
+                            resource_group_name=self.resource_group,
+                            container_app_name=app.name,
+                        )
+                        deleted += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to delete run app {app.name}: {e}")
+
+        except Exception as e:
+            logger.warning(f"Run Container App cleanup sweep failed: {e}")
+
+        if deleted:
+            logger.info(f"Cleaned up {deleted} completed run Container App(s)")
+
+        return deleted
+
+    def _start_cleanup_thread(self) -> None:
+        """Start a daemon thread that periodically cleans up completed run apps."""
+        interval = int(os.getenv("RUN_APP_CLEANUP_INTERVAL_SECS", "300"))
+
+        def _loop():
+            while True:
+                time.sleep(interval)
+                self._cleanup_completed_run_apps()
+
+        t = threading.Thread(target=_loop, daemon=True, name="run-app-cleanup")
+        t.start()
+        logger.info(f"Started run Container App cleanup thread (interval={interval}s)")
 
     def terminate(self, run_id):
         """

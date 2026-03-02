@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Deploy at SUBSCRIPTION scope (az deployment sub create ...) before running the full-stack template. Outputs roleDefinitionId to pass as agentRoleDefinitionId."
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Authorization/roleDefinitions",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(subscription().id, 'dagster-aca-agent-role')]",
+      "properties": {
+        "roleName": "Dagster ACA Agent",
+        "description": "Minimum permissions for the Dagster Cloud ACA agent to manage code-server Container Apps and assign managed identities to them.",
+        "type": "CustomRole",
+        "assignableScopes": [ "[subscription().id]" ],
+        "permissions": [
+          {
+            "actions": [
+              "Microsoft.App/containerApps/read",
+              "Microsoft.App/containerApps/write",
+              "Microsoft.App/containerApps/delete",
+              "Microsoft.App/containerApps/revisions/read",
+              "Microsoft.App/managedEnvironments/read",
+              "Microsoft.App/managedEnvironments/join/action",
+              "Microsoft.ManagedIdentity/userAssignedIdentities/assign/action"
+            ],
+            "notActions": []
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "roleDefinitionId": {
+      "type": "string",
+      "value": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, 'dagster-aca-agent-role'))]"
+    }
+  }
+}

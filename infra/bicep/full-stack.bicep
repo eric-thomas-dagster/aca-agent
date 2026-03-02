@@ -25,6 +25,8 @@ param containerAppName string = 'dagster-aca-agent'
 @metadata({ displayName: 'Agent Image', description: 'Docker image URL for the custom Dagster agent with ACA launcher. Example: ghcr.io/username/dagster-aca-agent:latest', group: 'Configuration' })
 param agentImage string
 param enableNatGateway bool = false
+@metadata({ displayName: 'Enable Key Vault Private Endpoint', description: 'When true, creates a private endpoint for Key Vault and disables public access. Recommended for production and compliance-sensitive deployments.', group: 'Network' })
+param enableKeyVaultPrivateEndpoint bool = false
 param additionalRoleAssignments array = []
 @metadata({ displayName: 'Additional Key Vault Secrets', description: 'List of additional secret names to fetch at container startup (beyond the required token secret).', group: 'Secrets' })
 param keyVaultSecretNames array = []
@@ -61,6 +63,8 @@ param codeServerMetricsEnabled bool = false
 param enableZeroDowntimeDeploys bool = false
 @metadata({ displayName: 'ACR Resource ID', description: 'Optional: Resource ID of Azure Container Registry to grant pull access. Example: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerRegistry/registries/{name}', group: 'Configuration' })
 param acrResourceId string = ''
+@metadata({ displayName: 'Agent Role Definition ID', description: 'Resource ID of a custom role definition for the agent (recommended). Leave blank to fall back to built-in Contributor. Deploy infra/bicep/aca-agent-role.bicep at subscription scope first to create the minimal-privilege role.', group: 'Configuration' })
+param agentRoleDefinitionId string = ''
 @allowed(['us', 'eu'])
 @metadata({ displayName: 'Dagster+ Region', description: 'Dagster+ region. \'us\' connects to dagster.cloud, \'eu\' connects to eu.dagster.cloud.', group: 'Configuration' })
 param dagsterRegion string = 'us'
@@ -98,6 +102,60 @@ resource keyVault 'Microsoft.KeyVault/vaults@2019-09-01' = {
         tenantId: subscription().tenantId
         objectId: reference(identity.id, '2018-11-30').principalId
         permissions: { secrets: [ 'get', 'list' ] }
+      }
+    ]
+    // Disable public access when a private endpoint is configured.
+    networkAcls: enableKeyVaultPrivateEndpoint ? {
+      bypass: 'AzureServices'
+      defaultAction: 'Deny'
+      ipRules: []
+      virtualNetworkRules: []
+    } : null
+  }
+}
+
+// Private endpoint + private DNS for Key Vault (optional)
+resource kvPrivateEndpoint 'Microsoft.Network/privateEndpoints@2021-05-01' = if (enableKeyVaultPrivateEndpoint) {
+  name: '${keyVaultName}-pe'
+  location: location
+  dependsOn: [ subnet ]
+  properties: {
+    subnet: { id: subnet.id }
+    privateLinkServiceConnections: [
+      {
+        name: '${keyVaultName}-plsc'
+        properties: {
+          privateLinkServiceId: keyVault.id
+          groupIds: [ 'vault' ]
+        }
+      }
+    ]
+  }
+}
+
+resource kvPrivateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = if (enableKeyVaultPrivateEndpoint) {
+  name: 'privatelink.vaultcore.azure.net'
+  location: 'global'
+}
+
+resource kvPrivateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = if (enableKeyVaultPrivateEndpoint) {
+  name: '${keyVaultName}-dns-link'
+  parent: kvPrivateDnsZone
+  location: 'global'
+  properties: {
+    virtualNetwork: { id: vnet.id }
+    registrationEnabled: false
+  }
+}
+
+resource kvPrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2021-05-01' = if (enableKeyVaultPrivateEndpoint) {
+  name: '${keyVaultName}-pe-dns-group'
+  parent: kvPrivateEndpoint
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'privatelink-vaultcore-azure-net'
+        properties: { privateDnsZoneId: kvPrivateDnsZone.id }
       }
     ]
   }
@@ -177,17 +235,100 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2020-11-01' = {
           priority: 100
         }
       }
+      // --- Outbound: Azure services (service tags) ---
       {
-        name: 'AllowOutbound'
+        name: 'AllowAzureActiveDirectory'
+        properties: {
+          protocol: 'Tcp'
+          sourcePortRange: '*'
+          destinationPortRange: '443'
+          sourceAddressPrefix: '*'
+          destinationAddressPrefix: 'AzureActiveDirectory'
+          access: 'Allow'
+          direction: 'Outbound'
+          priority: 200
+        }
+      }
+      {
+        name: 'AllowAzureKeyVault'
+        properties: {
+          protocol: 'Tcp'
+          sourcePortRange: '*'
+          destinationPortRange: '443'
+          sourceAddressPrefix: '*'
+          destinationAddressPrefix: 'AzureKeyVault'
+          access: 'Allow'
+          direction: 'Outbound'
+          priority: 210
+        }
+      }
+      {
+        name: 'AllowAzureContainerRegistry'
+        properties: {
+          protocol: 'Tcp'
+          sourcePortRange: '*'
+          destinationPortRange: '443'
+          sourceAddressPrefix: '*'
+          destinationAddressPrefix: 'AzureContainerRegistry'
+          access: 'Allow'
+          direction: 'Outbound'
+          priority: 220
+        }
+      }
+      {
+        name: 'AllowAzureMonitor'
+        properties: {
+          protocol: 'Tcp'
+          sourcePortRange: '*'
+          destinationPortRange: '443'
+          sourceAddressPrefix: '*'
+          destinationAddressPrefix: 'AzureMonitor'
+          access: 'Allow'
+          direction: 'Outbound'
+          priority: 230
+        }
+      }
+      // Required for ACA control plane communication
+      {
+        name: 'AllowAzureCloud'
+        properties: {
+          protocol: 'Tcp'
+          sourcePortRange: '*'
+          destinationPortRange: '443'
+          sourceAddressPrefix: '*'
+          destinationAddressPrefix: 'AzureCloud'
+          access: 'Allow'
+          direction: 'Outbound'
+          priority: 240
+        }
+      }
+      // Dagster+ endpoints (dagster.cloud / eu.dagster.cloud) — HTTPS only.
+      // NSGs do not support FQDN rules; use Azure Firewall for FQDN-level
+      // restriction if your policy requires it.
+      {
+        name: 'AllowHttpsInternet'
+        properties: {
+          protocol: 'Tcp'
+          sourcePortRange: '*'
+          destinationPortRange: '443'
+          sourceAddressPrefix: '*'
+          destinationAddressPrefix: 'Internet'
+          access: 'Allow'
+          direction: 'Outbound'
+          priority: 300
+        }
+      }
+      {
+        name: 'DenyAllOutbound'
         properties: {
           protocol: '*'
           sourcePortRange: '*'
           destinationPortRange: '*'
           sourceAddressPrefix: '*'
           destinationAddressPrefix: '*'
-          access: 'Allow'
+          access: 'Deny'
           direction: 'Outbound'
-          priority: 100
+          priority: 4096
         }
       }
     ]
@@ -271,13 +412,18 @@ resource roleAssigns 'Microsoft.Authorization/roleAssignments@2020-04-01-preview
   }
 }]
 
-// Grant Contributor role to agent identity on the resource group
-// This allows the agent to create and manage Container Apps for code servers
-resource contributorRoleAssignment 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
-  name: guid(subscription().id, resourceGroup().name, managedIdentityName, 'Contributor')
+// Grant the agent identity the role it needs to manage code-server Container Apps.
+// When agentRoleDefinitionId is supplied (output of aca-agent-role.bicep) the agent
+// receives only the minimum required permissions.  When left blank the built-in
+// Contributor role is used as a fallback — functional but broader than necessary.
+var contributorRoleDefId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')
+var effectiveAgentRoleId = !empty(agentRoleDefinitionId) ? agentRoleDefinitionId : contributorRoleDefId
+
+resource agentRoleAssignment 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
+  name: guid(subscription().id, resourceGroup().name, managedIdentityName, effectiveAgentRoleId)
   scope: resourceGroup()
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')
+    roleDefinitionId: effectiveAgentRoleId
     principalId: reference(identity.id, '2018-11-30').principalId
     principalType: 'ServicePrincipal'
   }

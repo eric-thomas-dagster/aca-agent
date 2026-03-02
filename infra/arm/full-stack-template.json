@@ -91,6 +91,15 @@
       "type": "bool",
       "defaultValue": false
     },
+    "enableKeyVaultPrivateEndpoint": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "displayName": "Enable Key Vault Private Endpoint",
+        "description": "When true, creates a private endpoint for Key Vault and disables public access. Recommended for production and compliance-sensitive deployments.",
+        "group": "Network"
+      }
+    },
     "additionalRoleAssignments": {
       "type": "array",
       "defaultValue": []
@@ -255,11 +264,22 @@
         "description": "Override the Dagster+ base domain (e.g. apac.dagster.cloud). Leave blank to use the value derived from dagsterRegion.",
         "group": "Configuration"
       }
+    },
+    "agentRoleDefinitionId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "displayName": "Agent Role Definition ID",
+        "description": "Resource ID of a custom role definition for the agent (recommended). Leave blank to fall back to built-in Contributor. Deploy infra/arm/aca-agent-role.json at subscription scope first to create the minimal-privilege role.",
+        "group": "Configuration"
+      }
     }
   },
   "variables": {
     "assignments": "[parameters('additionalRoleAssignments')]",
-    "dagsterBaseDomain": "[if(not(empty(parameters('dagsterBaseDomainOverride'))), parameters('dagsterBaseDomainOverride'), if(equals(parameters('dagsterRegion'), 'eu'), 'eu.dagster.cloud', 'dagster.cloud'))]"
+    "dagsterBaseDomain": "[if(not(empty(parameters('dagsterBaseDomainOverride'))), parameters('dagsterBaseDomainOverride'), if(equals(parameters('dagsterRegion'), 'eu'), 'eu.dagster.cloud', 'dagster.cloud'))]",
+    "contributorRoleDefId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]",
+    "effectiveAgentRoleId": "[if(not(empty(parameters('agentRoleDefinitionId'))), parameters('agentRoleDefinitionId'), variables('contributorRoleDefId'))]"
   },
   "resources": [
     {
@@ -309,10 +329,80 @@
               ]
             }
           }
-        ]
+        ],
+        "networkAcls": "[if(parameters('enableKeyVaultPrivateEndpoint'), createObject('bypass', 'AzureServices', 'defaultAction', 'Deny', 'ipRules', createArray(), 'virtualNetworkRules', createArray()), null())]"
       },
       "dependsOn": [
         "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('enableKeyVaultPrivateEndpoint')]",
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2021-05-01",
+      "name": "[format('{0}-pe', parameters('keyVaultName'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "subnet": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]"
+        },
+        "privateLinkServiceConnections": [
+          {
+            "name": "[format('{0}-plsc', parameters('keyVaultName'))]",
+            "properties": {
+              "privateLinkServiceId": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+              "groupIds": [ "vault" ]
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('enableKeyVaultPrivateEndpoint')]",
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "privatelink.vaultcore.azure.net",
+      "location": "global"
+    },
+    {
+      "condition": "[parameters('enableKeyVaultPrivateEndpoint')]",
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[format('privatelink.vaultcore.azure.net/{0}-dns-link', parameters('keyVaultName'))]",
+      "location": "global",
+      "properties": {
+        "virtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+        },
+        "registrationEnabled": false
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.vaultcore.azure.net')]",
+        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('enableKeyVaultPrivateEndpoint')]",
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2021-05-01",
+      "name": "[format('{0}-pe/default', parameters('keyVaultName'))]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "privatelink-vaultcore-azure-net",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.vaultcore.azure.net')]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', format('{0}-pe', parameters('keyVaultName')))]",
+        "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.vaultcore.azure.net')]"
       ]
     },
     {
@@ -423,16 +513,95 @@
             }
           },
           {
-            "name": "AllowOutbound",
+            "name": "AllowAzureActiveDirectory",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "AzureActiveDirectory",
+              "access": "Allow",
+              "direction": "Outbound",
+              "priority": 200
+            }
+          },
+          {
+            "name": "AllowAzureKeyVault",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "AzureKeyVault",
+              "access": "Allow",
+              "direction": "Outbound",
+              "priority": 210
+            }
+          },
+          {
+            "name": "AllowAzureContainerRegistry",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "AzureContainerRegistry",
+              "access": "Allow",
+              "direction": "Outbound",
+              "priority": 220
+            }
+          },
+          {
+            "name": "AllowAzureMonitor",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "AzureMonitor",
+              "access": "Allow",
+              "direction": "Outbound",
+              "priority": 230
+            }
+          },
+          {
+            "name": "AllowAzureCloud",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "AzureCloud",
+              "access": "Allow",
+              "direction": "Outbound",
+              "priority": 240
+            }
+          },
+          {
+            "name": "AllowHttpsInternet",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "Internet",
+              "access": "Allow",
+              "direction": "Outbound",
+              "priority": 300,
+              "description": "Dagster+ endpoints (dagster.cloud / eu.dagster.cloud). NSGs do not support FQDN rules; use Azure Firewall for FQDN-level restriction."
+            }
+          },
+          {
+            "name": "DenyAllOutbound",
             "properties": {
               "protocol": "*",
               "sourcePortRange": "*",
               "destinationPortRange": "*",
               "sourceAddressPrefix": "*",
               "destinationAddressPrefix": "*",
-              "access": "Allow",
+              "access": "Deny",
               "direction": "Outbound",
-              "priority": 100
+              "priority": 4096
             }
           }
         ]
@@ -591,9 +760,9 @@
     {
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2020-04-01-preview",
-      "name": "[guid(subscription().id, resourceGroup().name, parameters('managedIdentityName'), 'Contributor')]",
+      "name": "[guid(subscription().id, resourceGroup().name, parameters('managedIdentityName'), variables('effectiveAgentRoleId'))]",
       "properties": {
-        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]",
+        "roleDefinitionId": "[variables('effectiveAgentRoleId')]",
         "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName')), '2018-11-30').principalId]",
         "principalType": "ServicePrincipal"
       },

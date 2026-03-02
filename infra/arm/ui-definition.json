@@ -10,6 +10,7 @@
         "location",
         "dagsterRegion",
         "dagsterBaseDomainOverride",
+        "agentRoleDefinitionId",
         "environmentName",
         "containerAppName",
         "managedIdentityName"
@@ -57,6 +58,7 @@
       "label": { "default": "Network" },
       "parameters": [
         "enableNatGateway",
+        "enableKeyVaultPrivateEndpoint",
         "vnetName",
         "vnetPrefix",
         "subnetName",
@@ -68,6 +70,8 @@
     "location": { "default": "Location" },
     "dagsterRegion": { "default": "Dagster+ Region" },
     "dagsterBaseDomainOverride": { "default": "Dagster+ Base Domain Override" },
+    "agentRoleDefinitionId": { "default": "Agent Role Definition ID" },
+    "enableKeyVaultPrivateEndpoint": { "default": "Key Vault Private Endpoint" },
     "environmentName": { "default": "Container Apps Environment" },
     "containerAppName": { "default": "Container App Name" },
     "managedIdentityName": { "default": "Managed Identity" },
