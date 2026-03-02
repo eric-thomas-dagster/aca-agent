@@ -53,8 +53,10 @@ param dagsterOrgIdSecretValue string = ''
 param agentCpu string = '0.25'
 @metadata({ displayName: 'Agent Memory', description: 'Memory for the agent container expressed in Gi/Mi (e.g. \'1.0Gi\').', group: 'Compute' })
 param agentMemory string = '1.0Gi'
-@metadata({ displayName: 'Num Replicas', description: 'Number of identical agent replicas to keep running (1-5).', group: 'Compute' })
-param numReplicas int = 1
+@minValue(1)
+@maxValue(5)
+@metadata({ displayName: 'Num Replicas', description: 'Number of identical agent replicas to keep running (1-5). Default 2 for high availability.', group: 'Compute' })
+param numReplicas int = 2
 @metadata({ displayName: 'Code Server vCPU', description: 'Default vCPU for code server containers (e.g. 0.25, 0.5, 1.0).', group: 'Compute' })
 param codeServerCpu string = '0.5'
 @metadata({ displayName: 'Code Server Memory', description: 'Default memory for code server containers (e.g. 1.0Gi, 2.0Gi).', group: 'Compute' })
@@ -74,7 +76,7 @@ param enableAlerts bool = false
 @metadata({ displayName: 'Alert Email Address', description: 'Email address for alert notifications (required when enableAlerts is true).', group: 'Monitoring' })
 param alertEmailAddress string = ''
 @metadata({ displayName: 'Zero Downtime Deploys', description: 'When true, Container Apps will keep old revisions running until the new one is healthy.', group: 'Deployment' })
-param enableZeroDowntimeDeploys bool = false
+param enableZeroDowntimeDeploys bool = true
 @metadata({ displayName: 'ACR Resource ID', description: 'Optional: Resource ID of Azure Container Registry to grant pull access. Example: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerRegistry/registries/{name}', group: 'Configuration' })
 param acrResourceId string = ''
 @metadata({ displayName: 'Agent Role Definition ID', description: 'Resource ID of a custom role definition for the agent (recommended). Leave blank to fall back to built-in Contributor. Deploy infra/bicep/aca-agent-role.bicep at subscription scope first to create the minimal-privilege role.', group: 'Configuration' })

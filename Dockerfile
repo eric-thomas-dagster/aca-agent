@@ -5,8 +5,8 @@ COPY app /app
 COPY requirements.txt /app/requirements.txt
 WORKDIR /app
 # Install additional packages needed to access Azure Key Vault
-RUN pip install --no-cache-dir -r requirements.txt || true
-RUN pip install --no-cache-dir azure-identity azure-keyvault-secrets || true
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir azure-identity azure-keyvault-secrets
 
 ENV PYTHONUNBUFFERED=1
 
