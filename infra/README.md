@@ -23,14 +23,24 @@ az keyvault secret set --vault-name my-kv --name DAGSTER_DEPLOYMENT_NAME --value
 az keyvault secret set --vault-name my-kv --name DAGSTER_ORG_ID --value "<ORG_ID>"
 ```
 
-3. Run the provided deploy script (example using secret names):
+3. (Recommended) Create the minimal-privilege custom role at subscription scope first:
+
+```bash
+ROLE_ID=$(az deployment sub create \
+  --location eastus \
+  --template-file infra/arm/aca-agent-role.json \
+  --query properties.outputs.roleDefinitionId.value -o tsv)
+```
+
+4. Run the provided deploy script (example using secret names):
 
 ```bash
 RESOURCE_GROUP=my-rg LOCATION=eastus \
 DAGSTER_DEPLOYMENT_NAME_SECRET_NAME=DAGSTER_DEPLOYMENT_NAME \
 DAGSTER_ORG_ID_SECRET_NAME=DAGSTER_ORG_ID \
 DAGSTER_TOKEN_SECRET_NAME=DAGSTER_CLOUD_API_TOKEN \
-AGENT_CPU=0.5 AGENT_MEMORY=1.0Gi NUM_REPLICAS=1 \
+AGENT_CPU=0.5 AGENT_MEMORY=1.0Gi NUM_REPLICAS=2 \
+AGENT_ROLE_DEFINITION_ID="$ROLE_ID" \
 ./infra/deploy-arm-full.sh
 ```
 
@@ -58,5 +68,9 @@ Notes and tips
 - The template uses Azure-native compute units: fractional vCPU (`agentCpu`, e.g. `0.25`) and memory strings like `1.0Gi`.
 - Secrets are read from Key Vault at container startup using the user-assigned managed identity and the entrypoint helper in the container image.
 - The deploy script enforces that the agent token Key Vault secret name is provided and requires either plaintext deployment/org params or secret-name mappings.
-
-If you'd like, I can also add an `az pipelines` or GitHub Actions example to automate populating Key Vault and publishing the Template Spec in CI.
+- `dagsterRegion` accepts `us` (default) or `eu`; use `dagsterBaseDomainOverride` for custom or preview regions.
+- `agentRoleDefinitionId`: pass the output of `infra/arm/aca-agent-role.json` to grant the agent only the minimal permissions it needs. Leave blank to fall back to built-in Contributor.
+- `enableResourceLocks` (default `true`) places `CanNotDelete` locks on the Key Vault and managed identity.
+- `logRetentionDays` (default `90`, range `30`–`730`) controls Log Analytics retention.
+- `enableAlerts` + `alertEmailAddress`: opt-in Azure Monitor alert rules for agent health and Key Vault failures.
+- Code server sizing is controlled by `codeServerCpu` (default `0.5`) and `codeServerMemory` (default `1.0Gi`); these can be overridden per code location via `container_context` in Dagster+ configuration.

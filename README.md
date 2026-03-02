@@ -2,11 +2,13 @@
 
 **Deploy Dagster+ hybrid agents on Azure Container Apps with automatic code server management.**
 
-This repository provides a complete solution for running Dagster Cloud (Dagster+) on Azure Container Apps, including:
-- ✅ Custom agent that automatically creates code servers on ACA
+This repository provides a complete solution for running Dagster+ on Azure Container Apps, including:
+- ✅ Custom agent that automatically creates code servers and run workers on ACA
 - ✅ Ready-to-deploy ARM and Bicep templates
 - ✅ Secure secrets management via Azure Key Vault
-- ✅ Production-ready networking with VNet integration
+- ✅ Production-ready networking with VNet integration and hardened NSG egress
+- ✅ Enterprise features: resource locks, KV audit logging, Azure Monitor alerts, minimal-privilege RBAC
+- ✅ US and EU region support
 
 ---
 
@@ -47,6 +49,13 @@ docker push ghcr.io/YOUR_USERNAME/dagster-aca-agent:latest
 
 **Option B: Azure CLI**
 ```bash
+# (Recommended) Deploy the minimal-privilege custom role once per subscription:
+ROLE_ID=$(az deployment sub create \
+  --location eastus \
+  --template-file infra/arm/aca-agent-role.json \
+  --query properties.outputs.roleDefinitionId.value -o tsv)
+
+# Deploy the full stack:
 az deployment group create \
   --resource-group dagster-demo-rg \
   --template-file infra/arm/full-stack-template.json \
@@ -54,7 +63,9 @@ az deployment group create \
     agentImage=ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest \
     keyVaultName=dagster-kv-12345 \
     dagsterCloudApiTokenSecretName=DAGSTER-AGENT-TOKEN \
-    dagsterCloudApiToken="YOUR_TOKEN_HERE"
+    dagsterCloudApiToken="YOUR_TOKEN_HERE" \
+    agentRoleDefinitionId="$ROLE_ID"
+    # dagsterRegion=eu   # uncomment for EU region
 ```
 
 ---
@@ -63,14 +74,16 @@ az deployment group create \
 
 ```
 ├── app/
-│   ├── aca_launcher.py       # Custom ACA launchers (code servers & run workers)
+│   ├── aca_launcher.py       # AcaUserCodeLauncher + AcaRunLauncher
 │   ├── dagster.yaml          # Agent configuration
 │   └── entrypoint.py         # Fetches Key Vault secrets, starts agent
 ├── infra/
 │   ├── bicep/
 │   │   └── full-stack.bicep  # Complete infrastructure (Bicep)
 │   └── arm/
-│       └── full-stack-template.json  # Complete infrastructure (ARM)
+│       ├── full-stack-template.json  # Complete infrastructure (ARM)
+│       ├── aca-agent-role.json       # Minimal-privilege custom role (subscription scope)
+│       └── ui-definition.json        # Azure Portal parameter groups
 ├── Dockerfile                # Builds custom agent image
 ├── requirements.txt          # Python dependencies
 ├── QUICKSTART.md            # Complete deployment guide
@@ -92,10 +105,10 @@ az deployment group create \
 
 **Key Features:**
 - Custom `AcaUserCodeLauncher` creates code servers in the same Container Apps Environment
-- Custom `AcaRunLauncher` creates ephemeral run workers for job execution
-- External ingress for code server communication
-- Managed identity for secure Azure resource access
-- Key Vault integration for secrets
+- Custom `AcaRunLauncher` creates ephemeral run workers per job; background thread cleans up completed workers to stay under the 200-app environment limit
+- Managed identity for secure Azure resource access (no stored credentials)
+- Key Vault for secrets; audit logs shipped to Log Analytics
+- US and EU Dagster+ regions supported; override escape hatch for future regions
 
 ---
 
@@ -122,23 +135,31 @@ The versions should match the agent base image version (currently `1.12.6`).
 
 ## 🔒 Security
 
-- Secrets stored in Azure Key Vault (never in code or deployment history)
-- Managed identity for authentication (no credentials stored)
-- VNet integration for private networking
+- Secrets stored in Azure Key Vault — never in code, env var values, or deployment history
+- Managed identity for all Azure API calls (no stored credentials)
+- VNet integration with service-tag-based NSG egress rules and a DenyAll catch-all
+- Optional Key Vault private endpoint (disables public access entirely)
+- Minimal-privilege custom RBAC role (deploy `infra/arm/aca-agent-role.json` first); falls back to Contributor if not supplied
+- CanNotDelete resource locks on Key Vault and managed identity (on by default)
+- Key Vault audit logs shipped to Log Analytics (always enabled)
+- Optional Azure Monitor alerts for agent health and Key Vault failures
 - Optional NAT Gateway for static outbound IP
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full security model.
 
 ---
 
 ## 📊 Cost Estimate
 
-**Example: 1 agent + 3 code locations**
-- Agent: ~$20/month (0.25 vCPU, 1GB RAM)
-- Code Servers: ~$60/month (3 × $20/month, 0.5 vCPU, 1GB RAM each)
-- **Total: ~$80/month**
+**Example: 2 agent replicas + 3 code locations**
+- Agent: ~$40/month (2 × 0.25 vCPU, 1 GiB RAM — default HA configuration)
+- Code Servers: ~$60/month (3 × 0.5 vCPU, 1 GiB RAM each)
+- Run Workers: ~$0 when idle (scale to zero between runs)
+- **Total: ~$100/month**
 
-**vs. AKS minimum:** $170/month (53% savings!)
+**vs. AKS minimum (~$170/month):** ~40% savings with no cluster management overhead.
 
-Jobs scale to zero automatically (no additional cost when idle).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full cost model and optimization tips.
 
 ---
 

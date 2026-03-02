@@ -263,6 +263,9 @@ Now Azure will show you a form to fill in. Here's what to enter:
 - **Region**: `East US`
 
 **Configuration:**
+- **Dagster+ Region**: `us` for US, `eu` for EU (sets the correct Dagster+ endpoint automatically)
+- **Dagster+ Base Domain Override**: Leave blank unless using a custom/preview region
+- **Agent Role Definition ID**: Leave blank to use built-in Contributor, or paste the output of the custom-role deployment (see CLI section for how to create it — recommended for production)
 - **Environment Name**: `dagster-aca-env` (leave default)
 - **Log Analytics Name**: `dagster-logs` (leave default)
 - **Container App Name**: `dagster-aca-agent` (leave default)
@@ -281,11 +284,16 @@ Now Azure will show you a form to fill in. Here's what to enter:
 **Compute:**
 - **Agent Cpu**: `0.5` (upgrade from 0.25 for better performance)
 - **Agent Memory**: `1.0Gi` (leave default)
-- **Num Replicas**: `1` (leave default)
+- **Num Replicas**: `2` (default — two replicas for high availability)
+- **Code Server vCPU**: `0.5` (leave default)
+- **Code Server Memory**: `1.0Gi` (leave default)
 
 **Monitoring:**
 - **Enable Agent Metrics**: Leave unchecked
 - **Enable Code Server Metrics**: Leave unchecked
+- **Log Retention (days)**: `90` (leave default; increase for compliance requirements)
+- **Enable Alerts**: Check to receive email alerts for agent health issues
+- **Alert Email Address**: Your email (required if Enable Alerts is checked)
 
 **Network:**
 - **Enable Nat Gateway**: Leave unchecked
@@ -513,7 +521,15 @@ echo "✅ Resource group created: $RESOURCE_GROUP"
 # IMPORTANT: Replace with YOUR custom image URL from Docker setup!
 AGENT_IMAGE="ghcr.io/eric-thomas-dagster/dagster-aca-agent:latest"
 
-# Deploy the template (secrets passed as secure parameters)
+# (Recommended) Create the minimal-privilege custom role once per subscription.
+# Skip this if you prefer to use the built-in Contributor role.
+ROLE_ID=$(az deployment sub create \
+  --location $LOCATION \
+  --template-file infra/arm/aca-agent-role.json \
+  --query properties.outputs.roleDefinitionId.value -o tsv)
+echo "Custom role ID: $ROLE_ID"
+
+# Deploy the full stack (secrets passed as secure parameters)
 az deployment group create \
   --resource-group $RESOURCE_GROUP \
   --template-file infra/arm/full-stack-template.json \
@@ -527,8 +543,11 @@ az deployment group create \
     dagsterDeploymentNameSecretValue="$DEPLOYMENT_NAME" \
     dagsterOrgIdSecretName=DAGSTER-ORG-ID \
     dagsterOrgIdSecretValue="$ORG_ID" \
+    agentRoleDefinitionId="$ROLE_ID" \
+    dagsterRegion=us \
     agentCpu=0.5 \
     agentMemory=1.0Gi
+    # dagsterRegion=eu   # uncomment for EU region
 
 echo "✅ Deployment complete!"
 echo "The template created:"

@@ -1,13 +1,10 @@
-# Architecture: Fully Serverless Dagster Cloud on Azure
+# Architecture: Dagster Cloud Agent on Azure Container Apps
 
 ## Overview
 
-This project implements a fully serverless Dagster Cloud deployment on Azure using:
-- **Azure Container Apps (ACA)** for the always-on agent
-- **Azure Container Instances (ACI)** for on-demand code servers
-- **Custom `AciUserCodeLauncher`** to bridge Dagster Cloud with Azure
-
-## Architecture Diagram
+This project runs a fully serverless Dagster Cloud hybrid deployment on Azure using
+**Azure Container Apps (ACA)** for every component — agent, code servers, and run workers.
+Everything lives in a single ACA environment within a single resource group.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -16,477 +13,372 @@ This project implements a fully serverless Dagster Cloud deployment on Azure usi
 │                                                                         │
 │  Resource Group: dagster-aca-rg                                        │
 │  ┌──────────────────────────────────────────────────────────────────┐ │
-│  │ ┌────────────────────────┐                                       │ │
-│  │ │ Container App          │                                       │ │
-│  │ │ Name: dagster-agent    │                                       │ │
-│  │ │ Image: custom          │                                       │ │
-│  │ │ ├─ dagster-cloud-agent │  (base image)                        │ │
-│  │ │ ├─ aci_launcher.py     │  (custom code server launcher)       │ │
-│  │ │ ├─ dagster.yaml        │  (agent configuration)               │ │
-│  │ │ └─ entrypoint.py       │  (Key Vault secrets fetcher)         │ │
-│  │ │                        │                                       │ │
-│  │ │ Identity:              │                                       │ │
-│  │ │ └─ Managed Identity    │ ◄───────────────┐                    │ │
-│  │ └────────────────────────┘                  │                    │ │
-│  │                                              │                    │ │
-│  │ ┌────────────────────────┐                  │                    │ │
-│  │ │ Key Vault              │                  │ Permissions        │ │
-│  │ │ Name: dagster-kv       │ ◄────────────────┘                    │ │
-│  │ │                        │   - Secrets Get/List                  │ │
-│  │ │ Secrets:               │                                       │ │
-│  │ │ ├─ DAGSTER_API_TOKEN   │                                       │ │
-│  │ │ ├─ DEPLOYMENT_NAME     │                                       │ │
-│  │ │ └─ ORG_ID              │                                       │ │
-│  │ └────────────────────────┘                                       │ │
 │  │                                                                   │ │
-│  │ ┌────────────────────────┐                                       │ │
-│  │ │ VNet + Subnet          │                                       │ │
-│  │ │ ├─ ACA integrated      │                                       │ │
-│  │ │ └─ ACI integrated      │                                       │ │
-│  │ └────────────────────────┘                                       │ │
+│  │  Container Apps Environment (dagster-aca-env)                    │ │
+│  │  ┌─────────────────────────────────────────────────────────┐    │ │
+│  │  │                                                          │    │ │
+│  │  │  ┌──────────────────────┐  ┌───────────────────────┐   │    │ │
+│  │  │  │ Agent (2 replicas)   │  │ Code Server: proj-A    │   │    │ │
+│  │  │  │ dagster-aca-agent    │  │ dagster-prod-proj-a    │   │    │ │
+│  │  │  │                      │  │ min/max: 1             │   │    │ │
+│  │  │  │ AcaUserCodeLauncher  │  └───────────────────────┘   │    │ │
+│  │  │  │ AcaRunLauncher       │  ┌───────────────────────┐   │    │ │
+│  │  │  │ (always-on)          │  │ Code Server: proj-B    │   │    │ │
+│  │  │  └──────────────────────┘  │ dagster-prod-proj-b    │   │    │ │
+│  │  │                            └───────────────────────┘   │    │ │
+│  │  │  ┌───────────────────────────────────────────────────┐ │    │ │
+│  │  │  │ Run Workers (ephemeral, scale to 0 after run)      │ │    │ │
+│  │  │  │  dagster-run-<id>-0  dagster-run-<id>-1  ...       │ │    │ │
+│  │  │  │  Cleaned up by background thread after completion  │ │    │ │
+│  │  │  └───────────────────────────────────────────────────┘ │    │ │
+│  │  └─────────────────────────────────────────────────────────┘    │ │
+│  │                                                                   │ │
+│  │  ┌──────────────────────────┐  ┌──────────────────────────────┐ │ │
+│  │  │ Key Vault (dagster-kv)   │  │ Log Analytics Workspace      │ │ │
+│  │  │ - DAGSTER_CLOUD_API_TOKEN│  │ - Container App console logs │ │ │
+│  │  │ - DAGSTER_ORG_ID         │  │ - Key Vault audit logs       │ │ │
+│  │  │ - DAGSTER_DEPLOYMENT_NAME│  │ - Configurable retention     │ │ │
+│  │  │ Audit logs → Log Analytics  └──────────────────────────────┘ │ │
+│  │  │ Optional: private endpoint│                                   │ │
+│  │  └──────────────────────────┘                                   │ │
+│  │                                                                   │ │
+│  │  ┌──────────────────────────┐  ┌──────────────────────────────┐ │ │
+│  │  │ Managed Identity         │  │ VNet + NSG                   │ │ │
+│  │  │ - KV Get/List secrets    │  │ - Subnet delegated to ACA    │ │ │
+│  │  │ - Container Apps CRUD    │  │ - Service-tag egress rules   │ │ │
+│  │  │ CanNotDelete lock        │  │ - DenyAll catch-all          │ │ │
+│  │  └──────────────────────────┘  └──────────────────────────────┘ │ │
 │  └──────────────────────────────────────────────────────────────────┘ │
-│                                                                         │
-│  Resource Group: dagster-aca-rg-code-servers                           │
-│  ┌──────────────────────────────────────────────────────────────────┐ │
-│  │ Container Instances (Created Dynamically)                        │ │
-│  │                                                                   │ │
-│  │ ┌────────────────────────┐   ┌────────────────────────┐         │ │
-│  │ │ ACI: code-server-1     │   │ ACI: code-server-2     │         │ │
-│  │ │ Image: user-code:v1    │   │ Image: user-code:v2    │   ...  │ │
-│  │ │ State: Running         │   │ State: Terminated      │         │ │
-│  │ │ CPU: 0.5, RAM: 2GB     │   │ CPU: 1.0, RAM: 4GB     │         │ │
-│  │ └────────────────────────┘   └────────────────────────┘         │ │
-│  │                                                                   │ │
-│  │ Lifecycle:                                                        │ │
-│  │ 1. Agent creates container when code location deployed           │ │
-│  │ 2. Container runs jobs                                           │ │
-│  │ 3. Auto-terminates after TTL (default: 5 minutes idle)           │ │
-│  └──────────────────────────────────────────────────────────────────┘ │
-│                                                                         │
 └────────────────────────────────────────────────────────────────────────┘
                                  │
-                                 │ gRPC over HTTPS
-                                 │
+                                 │ gRPC / HTTPS
                                  ▼
-                    ┌────────────────────────┐
-                    │  Dagster Cloud         │
-                    │  (Control Plane)       │
-                    │                        │
-                    │  - Agent registration  │
-                    │  - Job orchestration   │
-                    │  - Metadata storage    │
-                    │  - UI/API              │
-                    └────────────────────────┘
+                    ┌────────────────────────────┐
+                    │  Dagster+ Control Plane     │
+                    │  dagster.cloud (US)         │
+                    │  eu.dagster.cloud (EU)      │
+                    └────────────────────────────┘
 ```
+
+---
 
 ## Components
 
 ### 1. Dagster Cloud Agent (ACA)
 
 **Runtime:** Azure Container Apps
-**Base Image:** `dagster/dagster-cloud-agent:latest`
-**Always Running:** Yes (minReplicas: 1)
+**Base Image:** `dagster/dagster-cloud-agent:1.12.6`
+**Always Running:** Yes (default 2 replicas for HA)
 
 **Responsibilities:**
-- Maintain persistent gRPC connection to Dagster Cloud
-- Receive code location deployment notifications
-- Launch ACI containers for code servers using `AciUserCodeLauncher`
-- Monitor code server health
-- Clean up terminated containers
+- Maintain persistent gRPC connection to Dagster+
+- Receive code location deployment notifications from Dagster+
+- Create/update/delete code server Container Apps via `AcaUserCodeLauncher`
+- Create ephemeral run worker Container Apps via `AcaRunLauncher`
+- Run a background cleanup thread that deletes completed run workers
 
 **Key Files:**
-- `app/entrypoint.py` - Fetches secrets from Key Vault, launches agent
-- `app/aci_launcher.py` - Custom code server launcher for ACI
-- `app/dagster.yaml` - Agent configuration
+- `app/entrypoint.py` — Fetches secrets from Key Vault, expands `dagster.yaml`, starts agent
+- `app/aca_launcher.py` — `AcaUserCodeLauncher` and `AcaRunLauncher` implementations
+- `app/dagster.yaml` — Agent configuration (env-var templated)
 
-**Environment Variables:**
-- `DAGSTER_CLOUD_API_TOKEN` - Agent authentication (from Key Vault)
-- `DAGSTER_CLOUD_DEPLOYMENT_NAME` - Deployment identifier
-- `DAGSTER_CLOUD_ORG_ID` - Organization identifier
-- `AZURE_SUBSCRIPTION_ID` - For ACI operations
-- `CODE_SERVER_RESOURCE_GROUP` - Where to create code servers
-- `CODE_SERVER_SUBNET_ID` - VNet integration (optional)
+**Environment Variables (set by ARM/Bicep template):**
 
-### 2. ACI User Code Launcher
+| Variable | Description |
+|---|---|
+| `DAGSTER_CLOUD_API_TOKEN` | Agent token (fetched from Key Vault by entrypoint) |
+| `DAGSTER_CLOUD_DEPLOYMENT_NAME` | Dagster+ deployment name |
+| `DAGSTER_CLOUD_ORG_ID` | Dagster+ organization ID |
+| `DAGSTER_CLOUD_BASE_DOMAIN` | `dagster.cloud` or `eu.dagster.cloud` |
+| `AZURE_SUBSCRIPTION_ID` | Azure subscription |
+| `AGENT_RESOURCE_GROUP` | Resource group where Container Apps are created |
+| `ENVIRONMENT_NAME` | ACA environment name |
+| `AZURE_LOCATION` | Azure region |
+| `AZURE_CLIENT_ID` | Managed identity client ID |
+| `CODE_SERVER_IDENTITY_ID` | Managed identity resource ID (assigned to code servers) |
+| `CODE_SERVER_CPU` | Default vCPU for code servers (e.g. `0.5`) |
+| `CODE_SERVER_MEMORY` | Default memory for code servers (e.g. `1.0Gi`) |
 
-**File:** `app/aci_launcher.py`
-**Class:** `AciUserCodeLauncher`
+---
 
-**How It Works:**
+### 2. AcaUserCodeLauncher
 
-```python
-# Configuration from dagster.yaml
-user_code_launcher:
-  module: aci_launcher
-  class: AciUserCodeLauncher
-  config:
-    subscription_id: {AZURE_SUBSCRIPTION_ID}
-    resource_group: dagster-aca-rg-code-servers
-    location: eastus
-    subnet_id: {optional}
-    cpu: 0.5
-    memory: 2.0
+**File:** `app/aca_launcher.py`
+**Class:** `AcaUserCodeLauncher`
+
+Manages long-lived code server Container Apps — one per code location. When Dagster+
+notifies the agent of a new or updated code location, the launcher creates or updates the
+corresponding Container App in the same ACA environment.
+
+**Container App naming:** `dagster-{deployment}-{location}` (max 32 chars).
+Names that would exceed 32 chars get a deterministic 7-character SHA-256 suffix to prevent
+silent collisions: `{raw[:24]}-{hash[:7]}`.
+
+**Compute sizing:** Defaults from `CODE_SERVER_CPU` / `CODE_SERVER_MEMORY` env vars
+(set via template parameters `codeServerCpu` / `codeServerMemory`). Can be overridden
+per code location via `container_context` in the Dagster+ code location configuration.
+
+---
+
+### 3. AcaRunLauncher
+
+**File:** `app/aca_launcher.py`
+**Class:** `AcaRunLauncher`
+
+Creates ephemeral run worker Container Apps for each job execution. Run workers scale
+to 0 after the run completes — the container process exits but the Container App object
+persists and counts against the 200-app-per-environment limit.
+
+**Cleanup thread:** A background daemon thread (interval configurable via
+`RUN_APP_CLEANUP_INTERVAL_SECS`, default 300s) scans for run worker Container Apps
+with `running_status != "Running"` that are at least `RUN_APP_CLEANUP_MIN_AGE_SECS`
+old (default 120s) and deletes them.
+
+**Run worker Container App tags:**
+- `dagster-component: run-worker` (used by cleanup thread to identify run apps)
+
+---
+
+### 4. Infrastructure (ARM / Bicep)
+
+**Templates:**
+- `infra/bicep/full-stack.bicep` — Bicep source
+- `infra/arm/full-stack-template.json` — ARM JSON equivalent
+
+**Resources deployed:**
+
+| Resource | Notes |
+|---|---|
+| VNet + Subnet | Delegated to `Microsoft.App/environments` |
+| NSG | Service-tag egress rules; DenyAll catch-all |
+| Log Analytics Workspace | Configurable retention (30–730 days) |
+| Container Apps Environment | Integrated with VNet |
+| User-Assigned Managed Identity | `CanNotDelete` lock by default |
+| Key Vault | `CanNotDelete` lock; optional private endpoint; audit logs → Log Analytics |
+| Container App (agent) | 2 replicas default; zero-downtime deploys on by default |
+| Role Assignment | Custom minimal role or Contributor fallback |
+| Optional: Azure Monitor alerts | Agent restarts, agent not running, KV failures |
+
+**Pre-deployment step (recommended):** Deploy `infra/arm/aca-agent-role.json`
+(or `infra/bicep/aca-agent-role.bicep`) at subscription scope to create the minimal
+custom RBAC role. Pass its output `roleDefinitionId` as `agentRoleDefinitionId` to
+the main template.
+
+```bash
+# 1. Deploy the custom role (once per subscription)
+az deployment sub create \
+  --location eastus \
+  --template-file infra/bicep/aca-agent-role.bicep \
+  --query properties.outputs.roleDefinitionId.value -o tsv
+# → /subscriptions/{sub}/providers/Microsoft.Authorization/roleDefinitions/{guid}
+
+# 2. Deploy the full stack, passing the role definition ID
+az deployment group create \
+  --resource-group my-rg \
+  --template-file infra/bicep/full-stack.bicep \
+  --parameters agentRoleDefinitionId=<output-from-above> ...
 ```
 
-**Lifecycle:**
-
-1. **Deployment Event** - Dagster Cloud notifies agent of new code location
-2. **Launch** - `launch_code_server()` creates ACI container group:
-   ```python
-   container_group = {
-       "location": "eastus",
-       "containers": [{
-           "name": "dagster-code-server",
-           "image": "myacr.azurecr.io/dagster-code:v1",
-           "resources": {"requests": {"cpu": 0.5, "memoryInGB": 2}},
-           "environment_variables": [
-               {"name": "DAGSTER_CLOUD_DEPLOYMENT_NAME", "value": "prod"},
-               {"name": "DAGSTER_CLOUD_URL", "value": "https://dagster.cloud"},
-               ...
-           ]
-       }],
-       "os_type": "Linux",
-       "restart_policy": "Never",
-       "subnet_ids": [{"id": subnet_id}] if subnet_id else None
-   }
-   ```
-3. **Registration** - Code server starts, registers with Dagster Cloud
-4. **Job Execution** - Code server executes runs
-5. **Termination** - After `server_ttl` idle time, container terminates
-6. **Cleanup** - Agent deletes container group
-
-**API Calls:**
-- `azure.mgmt.containerinstance.ContainerInstanceManagementClient`
-  - `container_groups.begin_create_or_update()` - Launch
-  - `container_groups.get()` - Status
-  - `container_groups.begin_delete()` - Cleanup
-
-### 3. Code Servers (ACI)
-
-**Runtime:** Azure Container Instances
-**Image:** User-provided (built from Dagster project)
-**Lifecycle:** On-demand (created/destroyed per deployment)
-
-**Responsibilities:**
-- Register as code location with Dagster Cloud
-- Serve Dagster definitions (assets, jobs, schedules, sensors)
-- Execute runs when triggered
-- Report status/logs to Dagster Cloud
-
-**Networking:**
-- Can integrate with VNet via `subnet_id`
-- Private IP only (no public exposure)
-- Communicates with Dagster Cloud via HTTPS/gRPC
-
-**Resource Limits:**
-- Default: 0.5 vCPU, 2GB RAM
-- Customizable per code location via `container_context`
-- Azure limits: Up to 4 vCPU, 16GB RAM per container
-
-### 4. Infrastructure (ARM/Bicep)
-
-**Template:** `infra/bicep/full-stack.bicep`
-
-**Creates:**
-1. VNet + Subnet (for ACA and ACI)
-2. Log Analytics Workspace
-3. Container Apps Environment
-4. User-Assigned Managed Identity
-5. Key Vault with access policy
-6. Container App (agent)
-7. Network Security Group
-8. Optional NAT Gateway
-
-**Outputs:**
-- `identityPrincipalId` - For role assignments
-- `codeServerResourceGroupName` - Where code servers will be created
-- `requiredRoleDefinitionIds` - Roles to assign
-
-**Post-Deployment:**
-Run `infra/setup-code-servers.sh` to:
-1. Create code servers resource group
-2. Assign Contributor role to managed identity
-3. Optionally assign AcrPull role
+---
 
 ## Security Model
 
 ### Authentication Flow
 
 ```
-┌─────────────┐
-│ Agent (ACA) │
-└──────┬──────┘
-       │ 1. Managed Identity
-       │    (DefaultAzureCredential)
-       ▼
-┌──────────────┐
-│  Key Vault   │  2. Fetch secrets:
-│              │     - DAGSTER_CLOUD_API_TOKEN
-│              │     - DEPLOYMENT_NAME
-└──────┬───────┘     - ORG_ID
-       │
-       │ 3. Use API token
-       ▼
-┌──────────────┐
-│ Dagster Cloud│  4. Authenticate agent
-└──────┬───────┘     Establish gRPC connection
-       │
-       │ 5. Deploy code location
-       ▼
-┌──────────────┐
-│  Agent       │  6. Use Managed Identity
-│              │     to call Azure API
-└──────┬───────┘
-       │
-       │ 7. Create ACI container
-       ▼
-┌──────────────┐
-│ Code Server  │  8. Use same managed
-│  (ACI)       │     identity (inherited)
-└──────┬───────┘
-       │ 9. Register with Dagster Cloud
-       ▼
-┌──────────────┐
-│ Dagster Cloud│  10. Execute runs
-└──────────────┘
+Agent (ACA)
+  │
+  │ 1. DefaultAzureCredential (Managed Identity)
+  ▼
+Key Vault
+  │ 2. Get secrets: API token, deployment name, org ID
+  ▼
+Agent starts, connects to Dagster+
+  │ 3. Agent token → gRPC connection
+  ▼
+Dagster+ Control Plane
+  │ 4. Deploy code location notification
+  ▼
+Agent (AcaUserCodeLauncher)
+  │ 5. Managed Identity → Azure Container Apps API
+  ▼
+Code Server Container App (created in same ACA environment)
+  │ 6. Agent Managed Identity assigned to code server
+  ▼
+Dagster+ Control Plane (code server registers and executes runs)
 ```
 
-### Permissions Required
+### RBAC (Managed Identity Permissions)
 
-**Managed Identity Roles:**
+**Recommended — custom minimal role** (deploy `infra/arm/aca-agent-role.json` first):
 
-1. **Key Vault Secrets Officer** (on Key Vault)
-   - Scope: `/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.KeyVault/vaults/{kv}`
-   - Permissions: `get`, `list` secrets
-   - Purpose: Agent fetches Dagster API token
+| Permission | Purpose |
+|---|---|
+| `Microsoft.App/containerApps/read` | List/get code servers and run workers |
+| `Microsoft.App/containerApps/write` | Create/update code servers and run workers |
+| `Microsoft.App/containerApps/delete` | Delete completed run workers |
+| `Microsoft.App/containerApps/revisions/read` | Read revision status |
+| `Microsoft.App/managedEnvironments/read` | Look up environment ID |
+| `Microsoft.App/managedEnvironments/join/action` | Join the ACA environment |
+| `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action` | Assign identity to code servers |
 
-2. **Contributor** (on code servers resource group)
-   - Scope: `/subscriptions/{sub}/resourceGroups/{rg}-code-servers`
-   - Purpose: Create/delete ACI containers
+**Fallback:** Built-in `Contributor` role on the resource group (functional but broader than necessary).
 
-3. **AcrPull** (on ACR) - Optional
-   - Scope: `/subscriptions/{sub}/resourceGroups/{acr-rg}/providers/Microsoft.ContainerRegistry/registries/{acr}`
-   - Purpose: Pull private container images
+**Key Vault access policy:** `Get` + `List` secrets (scoped to the agent's managed identity only).
 
 ### Network Security
 
-**Default (No VNet):**
-- Agent: Public IP (HTTPS only)
-- Code Servers: Public IP (HTTPS only)
-- All traffic encrypted via TLS
+**NSG egress rules (in priority order):**
 
-**VNet Integration:**
-- Agent: Private IP in ACA subnet
-- Code Servers: Private IP in ACI subnet
-- No public exposure
-- Can access private Azure resources (Storage, SQL, etc.)
+| Rule | Destination | Port | Purpose |
+|---|---|---|---|
+| AllowAzureActiveDirectory | `AzureActiveDirectory` | 443 | Managed Identity token |
+| AllowAzureKeyVault | `AzureKeyVault` | 443 | Secret fetching |
+| AllowAzureContainerRegistry | `AzureContainerRegistry` | 443 | Image pulls |
+| AllowAzureMonitor | `AzureMonitor` | 443 | Log ingestion |
+| AllowAzureCloud | `AzureCloud` | 443 | ACA control plane |
+| AllowHttpsInternet | `Internet` | 443 | Dagster+ endpoints |
+| DenyAllOutbound | `*` | `*` | Catch-all deny |
 
-**NSG Rules:**
-- Allow outbound HTTPS (443) to Dagster Cloud
-- Allow outbound HTTPS (443) to Azure APIs
-- Optional: Allow outbound to customer data sources
+For FQDN-level restriction (e.g. allow only `dagster.cloud` not all of Internet),
+replace the Internet rule with an Azure Firewall policy.
+
+**Optional Key Vault private endpoint:** When `enableKeyVaultPrivateEndpoint=true`,
+a private endpoint + private DNS zone is created and Key Vault public access is disabled.
+Requires VNet integration (included by default).
+
+### Compliance Features
+
+| Feature | Default | Parameter |
+|---|---|---|
+| Key Vault audit logs → Log Analytics | Always on | — |
+| CanNotDelete lock on Key Vault | On | `enableResourceLocks` |
+| CanNotDelete lock on Managed Identity | On | `enableResourceLocks` |
+| Log retention | 90 days | `logRetentionDays` (30–730) |
+| Azure Monitor alerts | Off | `enableAlerts` + `alertEmailAddress` |
+| Key Vault private endpoint | Off | `enableKeyVaultPrivateEndpoint` |
+
+---
 
 ## Cost Model
 
-### Azure Container Apps (Agent)
+All components run on ACA, billed by allocated vCPU-seconds and memory-second.
 
-**Pricing:** Pay for allocated resources
-**Formula:** `(vCPU × $0.000024/sec) + (Memory GB × $0.000003/sec)`
+**Formula:** `(vCPU × $0.000024/sec) + (Memory GiB × $0.000003/sec)`
 
-**Example (Default):**
-- vCPU: 0.25
-- Memory: 1GB
-- Always running (730 hours/month)
-- Cost: ~$20/month
+| Component | vCPU | Memory | Hours/month | Est. cost |
+|---|---|---|---|---|
+| Agent (2 replicas) | 0.25 each | 1 GiB each | 730 (always-on) | ~$40/month |
+| Code Server (per location) | 0.5 | 1 GiB | 730 (always-on) | ~$20/month |
+| Run Workers | 0.5 | 1 GiB | Per-run only | ~$0 when idle |
 
-### Azure Container Instances (Code Servers)
+**Example: 1 agent + 3 code locations:** ~$100/month
 
-**Pricing:** Pay per second running
-**Formula:** `(vCPU × $0.0000125/sec) + (Memory GB × $0.0000014/sec)`
+**vs. AKS minimum (~$170/month):** ~40% savings with no cluster management overhead.
 
-**Example (Default):**
-- vCPU: 0.5
-- Memory: 2GB
-- Running 100 hours/month (10 jobs × 10 hours each)
-- Cost: ~$5/month
+**Cost optimization tips:**
+- Right-size code servers using `codeServerCpu` / `codeServerMemory` template params
+- Override per code location via `container_context` in Dagster+ code location config
+- Run workers scale to 0 automatically — no cost between runs
+- Cleanup thread ensures completed run worker objects don't accumulate
 
-**Total: ~$25/month for typical workload**
+---
 
-### Cost Optimization
+## Multi-Region Support
 
-1. **Tune `server_ttl`:**
-   - Lower TTL = faster termination = lower cost
-   - Higher TTL = keep warm = faster job starts
-   - Recommended: 300 seconds (5 minutes)
+| Region | `dagsterRegion` | Base domain |
+|---|---|---|
+| US | `us` (default) | `dagster.cloud` |
+| EU | `eu` | `eu.dagster.cloud` |
+| Custom/future | — | Set `dagsterBaseDomainOverride` |
 
-2. **Right-size code servers:**
-   - Start with 0.5 vCPU, 2GB RAM
-   - Monitor and adjust per code location
-   - Use `container_context` for custom sizing
+The base domain flows to the `DAGSTER_CLOUD_BASE_DOMAIN` env var, which is used by
+`dagster.yaml` to construct the agent URL: `https://{org}.agent.{base_domain}`.
 
-3. **Use spot instances:** (Future)
-   - ACI doesn't support spot, but could use ACA Jobs
-
-4. **Batch jobs:**
-   - Group multiple runs to reuse code server
-   - Reduces container churn
+---
 
 ## Monitoring & Observability
 
-### Agent Logs
+### Logs
 
 ```bash
-# Real-time logs
-az containerapp logs show -n dagster-aca-agent -g dagster-rg --follow
+# Agent logs (real-time)
+az containerapp logs show -n dagster-aca-agent -g my-rg --follow
 
-# Query specific time range
+# Query via Log Analytics
 az monitor log-analytics query \
-  --workspace {workspace-id} \
-  --analytics-query "ContainerAppConsoleLogs_CL | where ContainerName_s == 'dagster-agent'"
+  --workspace <workspace-id> \
+  --analytics-query "ContainerAppConsoleLogs_CL | where ContainerName_s == 'dagster-agent' | order by TimeGenerated desc"
+
+# Key Vault audit log query
+az monitor log-analytics query \
+  --workspace <workspace-id> \
+  --analytics-query "AzureDiagnostics | where ResourceType == 'VAULTS' | where ResultType != 'Success'"
 ```
 
-### Code Server Logs
+### Azure Monitor Alerts (optional, `enableAlerts=true`)
 
-```bash
-# List running code servers
-az container list -g dagster-rg-code-servers -o table
+| Alert | Severity | Condition |
+|---|---|---|
+| Agent restarts | 2 | `RestartCount > 0` in 5m window |
+| Agent not running | 1 | `RunningReplicaCount < 1` over 15m |
+| Key Vault failures | 2 | `ServiceApiResult` with 4xx/5xx > 0 over 15m |
 
-# View specific code server logs
-az container logs -g dagster-rg-code-servers -n dagster-prod-project-123456
+All alerts route to an email action group (`alertEmailAddress`).
 
-# Follow logs
-az container logs -g dagster-rg-code-servers -n dagster-prod-project-123456 --follow
-```
+### Key Metrics to Monitor
 
-### Key Metrics
+| Metric | Target |
+|---|---|
+| Agent replica count | ≥ 2 (HA) |
+| Agent restart count | 0 |
+| Code server replica count | 1 per location |
+| KV API success rate | 100% |
+| Run worker count | Should trend to 0 between runs |
 
-**Agent Health:**
-- Container restart count
-- CPU/memory usage
-- gRPC connection status
-
-**Code Servers:**
-- Launch time (target: <30 seconds)
-- Active containers
-- Terminated containers (cleanup)
-- Failed launches
-
-**Costs:**
-- ACA consumption (always-on)
-- ACI consumption (per-second)
-- Total monthly spend
-
-### Alerts
-
-**Recommended Azure Monitor Alerts:**
-1. Agent restart > 3 times/hour
-2. Code server launch failures > 5/hour
-3. Code server launch time > 60 seconds
-4. Daily cost > threshold
-
-## Troubleshooting
-
-### Agent Won't Start
-
-```bash
-# Check agent logs
-az containerapp logs show -n dagster-agent -g dagster-rg --tail 100
-
-# Common issues:
-# - Missing DAGSTER_CLOUD_API_TOKEN
-# - Invalid API token
-# - Key Vault access denied
-# - AZURE_SUBSCRIPTION_ID not set
-```
-
-### Code Servers Not Launching
-
-```bash
-# Check agent logs for ACI errors
-az containerapp logs show -n dagster-agent -g dagster-rg --follow | grep "ACI"
-
-# Common issues:
-# - Managed identity lacks Contributor role on code-servers RG
-# - Invalid subscription ID
-# - Subnet too small (need /24 or larger)
-# - ACR access denied
-```
-
-### Code Server Launch Slow
-
-```bash
-# Check ACI provisioning state
-az container show -g dagster-rg-code-servers -n {container-name} --query "provisioningState"
-
-# Common issues:
-# - Large image size (optimize: use multi-stage builds, minimize layers)
-# - Cold start (first pull from ACR)
-# - Subnet IP exhaustion
-```
-
-### High Costs
-
-```bash
-# Check running code servers
-az container list -g dagster-rg-code-servers --query "[].{Name:name, State:containers[0].instanceView.currentState.state}" -o table
-
-# Common issues:
-# - Code servers not terminating (check server_ttl)
-# - Too many concurrent code servers
-# - Oversized containers (right-size CPU/memory)
-```
+---
 
 ## Limitations & Known Issues
 
-1. **No Built-in Autoscaling for Agent**
-   - Agent runs fixed replicas (minReplicas = maxReplicas)
-   - For high load, manually increase replicas
+1. **200 Container App limit per environment**
+   The ACA environment supports up to 200 Container Apps. Code servers + run workers
+   both count. The background cleanup thread handles run workers automatically. If you
+   have many code locations (close to 200), contact Azure support to request a quota
+   increase.
 
-2. **ACI Quotas**
-   - Default: 100 container groups per region per subscription
-   - Can be increased via support ticket
+2. **Agent replicas are fixed, not autoscaled**
+   `minReplicas == maxReplicas`. Scale by setting `numReplicas` (1–5). KEDA-based
+   autoscaling based on job queue depth is a potential future enhancement.
 
-3. **Subnet Size**
-   - ACI requires /24 or larger subnet
-   - Plan for growth
+3. **No spot/preemptible support**
+   ACA doesn't support spot pricing for always-on Container Apps. Run workers
+   (scale-to-zero) incur no cost when idle.
 
-4. **No Spot/Low-Priority**
-   - ACI doesn't support spot instances
-   - Always pay full price for code servers
+4. **Cold start latency for code servers**
+   First startup: 30–60 seconds (image pull + process start). Subsequent starts
+   are faster if the image is already cached in the environment. Code servers are
+   always-on so this only affects initial deployment or restarts.
 
-5. **Cold Start Latency**
-   - First code server launch: 30-60 seconds
-   - Subsequent launches: 10-30 seconds
-   - Mitigate: Increase `server_ttl` to keep warm
+5. **Single ACA environment per deployment**
+   All code servers and run workers share one ACA environment. Workload isolation
+   between environments requires separate deployments.
 
-6. **Custom Implementation**
-   - `AciUserCodeLauncher` is custom (not official Dagster)
-   - You maintain compatibility with Dagster Cloud API changes
-   - Test thoroughly before production
+---
 
 ## Future Enhancements
 
-1. **Azure Container Apps Jobs** for runs
-   - More cost-effective for short-lived runs
-   - Better isolation per run
+1. **KEDA autoscaling for agent** — scale replicas based on pending job queue depth
+2. **Application Insights integration** — distributed tracing across agent and code servers
+3. **Multi-region deployment** — active-active agents across Azure regions
+4. **Azure Container Apps Jobs** — for truly ephemeral run workers with better isolation
+5. **Prometheus metrics export** — custom metrics for Grafana dashboards
 
-2. **KEDA Autoscaling** for agent
-   - Scale agent replicas based on queue depth
-
-3. **Distributed Tracing**
-   - Azure Application Insights integration
-   - End-to-end observability
-
-4. **Multi-Region**
-   - Deploy agents in multiple regions
-   - Route code locations to nearest agent
-
-5. **Prometheus Metrics**
-   - Export custom metrics for Grafana dashboards
+---
 
 ## References
 
-- [Dagster Cloud Documentation](https://docs.dagster.io/dagster-plus)
+- [Dagster+ Documentation](https://docs.dagster.io/dagster-plus)
 - [Azure Container Apps](https://learn.microsoft.com/azure/container-apps/)
-- [Azure Container Instances](https://learn.microsoft.com/azure/container-instances/)
-- [Azure SDK for Python - Container Instances](https://learn.microsoft.com/python/api/azure-mgmt-containerinstance/)
+- [Azure Container Apps Quotas](https://learn.microsoft.com/azure/container-apps/quotas)
+- [Azure Key Vault](https://learn.microsoft.com/azure/key-vault/)
+- [Azure Monitor Metric Alerts](https://learn.microsoft.com/azure/azure-monitor/alerts/alerts-metric)
