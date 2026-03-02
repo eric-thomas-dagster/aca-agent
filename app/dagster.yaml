@@ -40,9 +40,10 @@ dagster_cloud_api:
   # Agent token (fetched from Key Vault by entrypoint.py)
   agent_token: ${DAGSTER_CLOUD_API_TOKEN}
 
-  # Dagster Cloud URL (constructed from org ID)
-  # Format: https://{org}.agent.dagster.cloud
-  url: https://${DAGSTER_CLOUD_ORG_ID}.agent.dagster.cloud
+  # Dagster Cloud URL (constructed from org ID and region)
+  # US:  https://{org}.agent.dagster.cloud
+  # EU:  https://{org}.agent.eu.dagster.cloud
+  url: https://${DAGSTER_CLOUD_ORG_ID}.agent.${DAGSTER_CLOUD_BASE_DOMAIN:dagster.cloud}
 
   # Deployment name
   deployment: ${DAGSTER_CLOUD_DEPLOYMENT_NAME:prod}

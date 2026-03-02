@@ -61,6 +61,13 @@ param codeServerMetricsEnabled bool = false
 param enableZeroDowntimeDeploys bool = false
 @metadata({ displayName: 'ACR Resource ID', description: 'Optional: Resource ID of Azure Container Registry to grant pull access. Example: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerRegistry/registries/{name}', group: 'Configuration' })
 param acrResourceId string = ''
+@allowed(['us', 'eu'])
+@metadata({ displayName: 'Dagster+ Region', description: 'Dagster+ region. \'us\' connects to dagster.cloud, \'eu\' connects to eu.dagster.cloud.', group: 'Configuration' })
+param dagsterRegion string = 'us'
+@metadata({ displayName: 'Dagster+ Base Domain Override', description: 'Override the Dagster+ base domain (e.g. apac.dagster.cloud). Leave blank to use the value derived from dagsterRegion.', group: 'Configuration' })
+param dagsterBaseDomainOverride string = ''
+
+var dagsterBaseDomain = !empty(dagsterBaseDomainOverride) ? dagsterBaseDomainOverride : (dagsterRegion == 'eu' ? 'eu.dagster.cloud' : 'dagster.cloud')
 
 resource vnet 'Microsoft.Network/virtualNetworks@2020-11-01' = {
   name: vnetName
@@ -227,7 +234,8 @@ resource containerApp 'Microsoft.App/containerApps@2022-03-01' = {
           resources: { cpu: json(agentCpu), memory: agentMemory }
           env: [
               { name: 'AGENT_NAME', value: containerAppName }
-              { name: 'DAGSTER_CLOUD_URL', value: 'https://dagster.cloud' }
+              { name: 'DAGSTER_CLOUD_URL', value: 'https://${dagsterBaseDomain}' }
+              { name: 'DAGSTER_CLOUD_BASE_DOMAIN', value: dagsterBaseDomain }
               { name: 'KEY_VAULT_URI', value: 'https://${keyVaultName}.vault.azure.net/' }
               { name: 'KEY_VAULT_SECRET_NAMES', value: join(concat([format('{0}:DAGSTER_CLOUD_API_TOKEN', dagsterCloudApiTokenSecretName)], keyVaultSecretNames, dagsterDeploymentNameSecretName != '' ? [ format('{0}:DAGSTER_CLOUD_DEPLOYMENT_NAME', dagsterDeploymentNameSecretName) ] : [], dagsterOrgIdSecretName != '' ? [ format('{0}:DAGSTER_CLOUD_ORG_ID', dagsterOrgIdSecretName) ] : []), ',') }
               { name: 'DAGSTER_CLOUD_DEPLOYMENT_NAME', value: dagsterDeploymentName }

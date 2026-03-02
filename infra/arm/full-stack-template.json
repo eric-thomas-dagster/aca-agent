@@ -236,10 +236,30 @@
         "description": "Optional: Resource ID of Azure Container Registry to grant pull access. Example: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerRegistry/registries/{name}",
         "group": "Configuration"
       }
+    },
+    "dagsterRegion": {
+      "type": "string",
+      "defaultValue": "us",
+      "allowedValues": ["us", "eu"],
+      "metadata": {
+        "displayName": "Dagster+ Region",
+        "description": "Dagster+ region: 'us' connects to dagster.cloud, 'eu' connects to eu.dagster.cloud.",
+        "group": "Configuration"
+      }
+    },
+    "dagsterBaseDomainOverride": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "displayName": "Dagster+ Base Domain Override",
+        "description": "Override the Dagster+ base domain (e.g. apac.dagster.cloud). Leave blank to use the value derived from dagsterRegion.",
+        "group": "Configuration"
+      }
     }
   },
   "variables": {
-    "assignments": "[parameters('additionalRoleAssignments')]"
+    "assignments": "[parameters('additionalRoleAssignments')]",
+    "dagsterBaseDomain": "[if(not(empty(parameters('dagsterBaseDomainOverride'))), parameters('dagsterBaseDomainOverride'), if(equals(parameters('dagsterRegion'), 'eu'), 'eu.dagster.cloud', 'dagster.cloud'))]"
   },
   "resources": [
     {
@@ -476,7 +496,11 @@
                 },
                 {
                   "name": "DAGSTER_CLOUD_URL",
-                  "value": "https://dagster.cloud"
+                  "value": "[format('https://{0}', variables('dagsterBaseDomain'))]"
+                },
+                {
+                  "name": "DAGSTER_CLOUD_BASE_DOMAIN",
+                  "value": "[variables('dagsterBaseDomain')]"
                 },
                 {
                   "name": "KEY_VAULT_URI",

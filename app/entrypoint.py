@@ -65,9 +65,14 @@ def _fetch_key_vault_secrets(vault_uri: str, secret_names: List[str]):
 
 
 def _expand_env_vars_in_yaml():
-    """Expand environment variables in dagster.yaml before Dagster reads it."""
+    """Expand environment variables in dagster.yaml before Dagster reads it.
+
+    Set DAGSTER_YAML_EXPAND_DEBUG=true to log each variable name being expanded
+    (values are never logged).
+    """
     import re
 
+    debug = os.getenv("DAGSTER_YAML_EXPAND_DEBUG", "").lower() == "true"
     yaml_path = "/app/dagster.yaml"
     try:
         with open(yaml_path, 'r') as f:
@@ -82,8 +87,10 @@ def _expand_env_vars_in_yaml():
                 var_name = var_expr
                 default = ''
 
-            value = os.getenv(var_name.strip(), default.strip())
-            logging.info("Expanding ${%s} -> %s", var_name, value if value else "(empty)")
+            var_name = var_name.strip()
+            value = os.getenv(var_name, default.strip())
+            if debug:
+                logging.debug("Expanding ${%s}", var_name)
             return value
 
         # Replace all ${VAR} and ${VAR:default} patterns
@@ -93,7 +100,7 @@ def _expand_env_vars_in_yaml():
         with open(yaml_path, 'w') as f:
             f.write(expanded_content)
 
-        logging.info("Successfully expanded environment variables in dagster.yaml")
+        logging.info("Expanded environment variables in dagster.yaml")
     except Exception as e:
         logging.error("Failed to expand environment variables in dagster.yaml: %s", e)
         raise
@@ -153,8 +160,9 @@ def main():
     logging.info("  - API Token: %s", token_set)
 
     # Construct and log the expected URL
+    base_domain = os.getenv("DAGSTER_CLOUD_BASE_DOMAIN", "dagster.cloud")
     if org_id and org_id != "NOT SET":
-        constructed_url = f"https://{org_id}.agent.dagster.cloud"
+        constructed_url = f"https://{org_id}.agent.{base_domain}"
         logging.info("  - Constructed URL: %s", constructed_url)
         logging.info("  - GraphQL endpoint: %s/%s/graphql", constructed_url, deployment)
     else:

@@ -8,6 +8,8 @@
       "label": { "default": "Configuration" },
       "parameters": [
         "location",
+        "dagsterRegion",
+        "dagsterBaseDomainOverride",
         "environmentName",
         "containerAppName",
         "managedIdentityName"
@@ -64,6 +66,8 @@
   ],
   "parameterLabels": {
     "location": { "default": "Location" },
+    "dagsterRegion": { "default": "Dagster+ Region" },
+    "dagsterBaseDomainOverride": { "default": "Dagster+ Base Domain Override" },
     "environmentName": { "default": "Container Apps Environment" },
     "containerAppName": { "default": "Container App Name" },
     "managedIdentityName": { "default": "Managed Identity" },
