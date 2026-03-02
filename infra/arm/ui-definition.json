@@ -11,6 +11,7 @@
         "dagsterRegion",
         "dagsterBaseDomainOverride",
         "agentRoleDefinitionId",
+        "enableResourceLocks",
         "environmentName",
         "containerAppName",
         "managedIdentityName"
@@ -33,7 +34,9 @@
       "parameters": [
         "agentCpu",
         "agentMemory",
-        "numReplicas"
+        "numReplicas",
+        "codeServerCpu",
+        "codeServerMemory"
       ]
     },
     {
@@ -42,7 +45,10 @@
       "parameters": [
         "agentMetricsEnabled",
         "codeServerMetricsEnabled",
-        "logAnalyticsName"
+        "logAnalyticsName",
+        "logRetentionDays",
+        "enableAlerts",
+        "alertEmailAddress"
       ]
     },
     {
@@ -83,9 +89,15 @@
     "agentCpu": { "default": "Agent vCPU" },
     "agentMemory": { "default": "Agent Memory" },
     "numReplicas": { "default": "Num Replicas" },
+    "codeServerCpu": { "default": "Code Server vCPU" },
+    "codeServerMemory": { "default": "Code Server Memory" },
     "agentMetricsEnabled": { "default": "Enable Agent Metrics" },
     "codeServerMetricsEnabled": { "default": "Enable Code Server Metrics" },
     "logAnalyticsName": { "default": "Log Analytics Workspace" },
+    "logRetentionDays": { "default": "Log Retention (days)" },
+    "enableAlerts": { "default": "Enable Alerts" },
+    "alertEmailAddress": { "default": "Alert Email Address" },
+    "enableResourceLocks": { "default": "Enable Resource Locks" },
     "enableZeroDowntimeDeploys": { "default": "Zero Downtime Deploys" },
     "enableNatGateway": { "default": "Enable NAT Gateway" },
     "vnetName": { "default": "Virtual Network Name" },

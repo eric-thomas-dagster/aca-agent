@@ -32,8 +32,9 @@ user_code_launcher:
 
     # Default compute resources for code servers
     # Can be overridden per code location via container_context
-    cpu: 0.5  # vCPU cores (0.25, 0.5, 1.0, 2.0, etc.)
-    memory: 1.0Gi  # Memory (e.g., 0.5Gi, 1.0Gi, 2.0Gi)
+    # Set CODE_SERVER_CPU and CODE_SERVER_MEMORY env vars (or template params) to change defaults.
+    cpu: ${CODE_SERVER_CPU:0.5}
+    memory: ${CODE_SERVER_MEMORY:1.0Gi}
 
 # Agent settings
 dagster_cloud_api:

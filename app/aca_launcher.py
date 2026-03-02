@@ -18,6 +18,7 @@ import os
 import logging
 import time
 import asyncio
+import hashlib
 import threading
 import datetime
 from typing import Dict, Optional, List, Collection, NamedTuple
@@ -612,11 +613,16 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         Returns:
             Container App name (used to track/manage the app)
         """
-        # Generate Container App name
-        # Format: dagster-{deployment}-{location}
-        # Sanitize for ACA naming rules (lowercase alphanumeric and hyphens, max 32 chars)
-        app_name = f"dagster-{deployment_name}-{location_name}"[:32]
-        app_name = app_name.lower().replace("_", "-")
+        # Generate Container App name.
+        # ACA naming rules: lowercase alphanumeric + hyphens, max 32 chars.
+        # If the raw name exceeds 32 chars we append a 7-char hash suffix so that
+        # different (deployment, location) pairs never silently share the same name.
+        raw = f"dagster-{deployment_name}-{location_name}".lower().replace("_", "-")
+        if len(raw) > 32:
+            suffix = hashlib.sha256(raw.encode()).hexdigest()[:7]
+            app_name = f"{raw[:24]}-{suffix}"
+        else:
+            app_name = raw
 
         logger.info(
             f"Launching code server: deployment={deployment_name}, "
@@ -1088,9 +1094,13 @@ Or query Log Analytics:
                 "Azure Container Apps launcher requires container images."
             )
 
-        # Generate Container App name
-        app_name = f"dagster-{deployment_name}-{location_name}"[:32]
-        app_name = app_name.lower().replace("_", "-")
+        # Generate Container App name (same collision-safe logic as the code-server launcher).
+        raw = f"dagster-{deployment_name}-{location_name}".lower().replace("_", "-")
+        if len(raw) > 32:
+            suffix = hashlib.sha256(raw.encode()).hexdigest()[:7]
+            app_name = f"{raw[:24]}-{suffix}"
+        else:
+            app_name = raw
 
         logger.info(
             f"Starting server spinup: deployment={deployment_name}, "

@@ -273,6 +273,62 @@
         "description": "Resource ID of a custom role definition for the agent (recommended). Leave blank to fall back to built-in Contributor. Deploy infra/arm/aca-agent-role.json at subscription scope first to create the minimal-privilege role.",
         "group": "Configuration"
       }
+    },
+    "codeServerCpu": {
+      "type": "string",
+      "defaultValue": "0.5",
+      "metadata": {
+        "displayName": "Code Server vCPU",
+        "description": "Default vCPU for code server containers (e.g. 0.25, 0.5, 1.0).",
+        "group": "Compute"
+      }
+    },
+    "codeServerMemory": {
+      "type": "string",
+      "defaultValue": "1.0Gi",
+      "metadata": {
+        "displayName": "Code Server Memory",
+        "description": "Default memory for code server containers (e.g. 1.0Gi, 2.0Gi).",
+        "group": "Compute"
+      }
+    },
+    "logRetentionDays": {
+      "type": "int",
+      "defaultValue": 90,
+      "minValue": 30,
+      "maxValue": 730,
+      "metadata": {
+        "displayName": "Log Retention (days)",
+        "description": "Number of days to retain logs in Log Analytics (30-730). Default 90.",
+        "group": "Monitoring"
+      }
+    },
+    "enableResourceLocks": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "displayName": "Enable Resource Locks",
+        "description": "Apply CanNotDelete locks to the Key Vault and managed identity to prevent accidental deletion.",
+        "group": "Configuration"
+      }
+    },
+    "enableAlerts": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "displayName": "Enable Alerts",
+        "description": "Create Azure Monitor alert rules for agent health and Key Vault access failures.",
+        "group": "Monitoring"
+      }
+    },
+    "alertEmailAddress": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "displayName": "Alert Email Address",
+        "description": "Email address for alert notifications (required when enableAlerts is true).",
+        "group": "Monitoring"
+      }
     }
   },
   "variables": {
@@ -299,7 +355,10 @@
       "type": "Microsoft.OperationalInsights/workspaces",
       "apiVersion": "2020-08-01",
       "name": "[parameters('logAnalyticsName')]",
-      "location": "[parameters('location')]"
+      "location": "[parameters('location')]",
+      "properties": {
+        "retentionInDays": "[parameters('logRetentionDays')]"
+      }
     },
     {
       "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
@@ -722,6 +781,14 @@
                 {
                   "name": "CODE_SERVER_IDENTITY_ID",
                   "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
+                },
+                {
+                  "name": "CODE_SERVER_CPU",
+                  "value": "[parameters('codeServerCpu')]"
+                },
+                {
+                  "name": "CODE_SERVER_MEMORY",
+                  "value": "[parameters('codeServerMemory')]"
                 }
               ]
             }
@@ -768,6 +835,164 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults/providers/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "name": "[format('{0}/Microsoft.Insights/kv-audit', parameters('keyVaultName'))]",
+      "properties": {
+        "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]",
+        "logs": [
+          { "category": "AuditEvent", "enabled": true }
+        ],
+        "metrics": [
+          { "category": "AllMetrics", "enabled": true }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('enableResourceLocks')]",
+      "type": "Microsoft.KeyVault/vaults/providers/locks",
+      "apiVersion": "2017-04-01",
+      "name": "[format('{0}/Microsoft.Authorization/{1}-lock', parameters('keyVaultName'), parameters('keyVaultName'))]",
+      "properties": {
+        "level": "CanNotDelete",
+        "notes": "Locked to prevent accidental deletion of the Dagster agent Key Vault."
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('enableResourceLocks')]",
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities/providers/locks",
+      "apiVersion": "2017-04-01",
+      "name": "[format('{0}/Microsoft.Authorization/{1}-lock', parameters('managedIdentityName'), parameters('managedIdentityName'))]",
+      "properties": {
+        "level": "CanNotDelete",
+        "notes": "Locked to prevent accidental deletion of the Dagster agent managed identity."
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('enableAlerts')]",
+      "type": "Microsoft.Insights/actionGroups",
+      "apiVersion": "2023-01-01",
+      "name": "dagster-alerts",
+      "location": "global",
+      "properties": {
+        "groupShortName": "dagster",
+        "enabled": true,
+        "emailReceivers": "[if(not(empty(parameters('alertEmailAddress'))), createArray(createObject('name', 'email-receiver', 'emailAddress', parameters('alertEmailAddress'), 'useCommonAlertSchema', true())), createArray())]"
+      }
+    },
+    {
+      "condition": "[parameters('enableAlerts')]",
+      "type": "Microsoft.Insights/metricAlerts",
+      "apiVersion": "2018-03-01",
+      "name": "dagster-agent-restarts",
+      "location": "global",
+      "properties": {
+        "description": "Dagster agent container has restarted.",
+        "severity": 2,
+        "enabled": true,
+        "scopes": [ "[resourceId('Microsoft.App/containerApps', parameters('containerAppName'))]" ],
+        "evaluationFrequency": "PT5M",
+        "windowSize": "PT5M",
+        "criteria": {
+          "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+          "allOf": [
+            {
+              "name": "RestartCount",
+              "metricName": "RestartCount",
+              "operator": "GreaterThan",
+              "threshold": 0,
+              "timeAggregation": "Total",
+              "criterionType": "StaticThresholdCriterion"
+            }
+          ]
+        },
+        "actions": [ { "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', 'dagster-alerts')]" } ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Insights/actionGroups', 'dagster-alerts')]",
+        "[resourceId('Microsoft.App/containerApps', parameters('containerAppName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('enableAlerts')]",
+      "type": "Microsoft.Insights/metricAlerts",
+      "apiVersion": "2018-03-01",
+      "name": "dagster-agent-not-running",
+      "location": "global",
+      "properties": {
+        "description": "Dagster agent has zero running replicas.",
+        "severity": 1,
+        "enabled": true,
+        "scopes": [ "[resourceId('Microsoft.App/containerApps', parameters('containerAppName'))]" ],
+        "evaluationFrequency": "PT5M",
+        "windowSize": "PT15M",
+        "criteria": {
+          "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+          "allOf": [
+            {
+              "name": "RunningReplicas",
+              "metricName": "RunningReplicaCount",
+              "operator": "LessThan",
+              "threshold": 1,
+              "timeAggregation": "Average",
+              "criterionType": "StaticThresholdCriterion"
+            }
+          ]
+        },
+        "actions": [ { "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', 'dagster-alerts')]" } ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Insights/actionGroups', 'dagster-alerts')]",
+        "[resourceId('Microsoft.App/containerApps', parameters('containerAppName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('enableAlerts')]",
+      "type": "Microsoft.Insights/metricAlerts",
+      "apiVersion": "2018-03-01",
+      "name": "dagster-keyvault-failures",
+      "location": "global",
+      "properties": {
+        "description": "Key Vault API requests are failing — agent may be unable to fetch secrets.",
+        "severity": 2,
+        "enabled": true,
+        "scopes": [ "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]" ],
+        "evaluationFrequency": "PT5M",
+        "windowSize": "PT15M",
+        "criteria": {
+          "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+          "allOf": [
+            {
+              "name": "ServiceApiResult",
+              "metricName": "ServiceApiResult",
+              "operator": "GreaterThan",
+              "threshold": 0,
+              "timeAggregation": "Total",
+              "criterionType": "StaticThresholdCriterion",
+              "dimensions": [
+                { "name": "StatusCode", "operator": "Include", "values": [ "4xx", "5xx" ] }
+              ]
+            }
+          ]
+        },
+        "actions": [ { "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', 'dagster-alerts')]" } ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Insights/actionGroups', 'dagster-alerts')]",
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
       ]
     }
   ],

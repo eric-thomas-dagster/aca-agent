@@ -55,10 +55,24 @@ param agentCpu string = '0.25'
 param agentMemory string = '1.0Gi'
 @metadata({ displayName: 'Num Replicas', description: 'Number of identical agent replicas to keep running (1-5).', group: 'Compute' })
 param numReplicas int = 1
+@metadata({ displayName: 'Code Server vCPU', description: 'Default vCPU for code server containers (e.g. 0.25, 0.5, 1.0).', group: 'Compute' })
+param codeServerCpu string = '0.5'
+@metadata({ displayName: 'Code Server Memory', description: 'Default memory for code server containers (e.g. 1.0Gi, 2.0Gi).', group: 'Compute' })
+param codeServerMemory string = '1.0Gi'
 @metadata({ displayName: 'Enable Agent Metrics', description: 'Allow the agent to send metrics to Dagster Cloud.', group: 'Monitoring' })
 param agentMetricsEnabled bool = false
 @metadata({ displayName: 'Enable Code Server Metrics', description: 'Allow code server metrics to be reported to Dagster Cloud.', group: 'Monitoring' })
 param codeServerMetricsEnabled bool = false
+@minValue(30)
+@maxValue(730)
+@metadata({ displayName: 'Log Retention (days)', description: 'Number of days to retain logs in Log Analytics (30-730). Default 90.', group: 'Monitoring' })
+param logRetentionDays int = 90
+@metadata({ displayName: 'Enable Resource Locks', description: 'Apply CanNotDelete locks to the Key Vault and managed identity to prevent accidental deletion.', group: 'Configuration' })
+param enableResourceLocks bool = true
+@metadata({ displayName: 'Enable Alerts', description: 'Create Azure Monitor alert rules for agent health and Key Vault access failures.', group: 'Monitoring' })
+param enableAlerts bool = false
+@metadata({ displayName: 'Alert Email Address', description: 'Email address for alert notifications (required when enableAlerts is true).', group: 'Monitoring' })
+param alertEmailAddress string = ''
 @metadata({ displayName: 'Zero Downtime Deploys', description: 'When true, Container Apps will keep old revisions running until the new one is healthy.', group: 'Deployment' })
 param enableZeroDowntimeDeploys bool = false
 @metadata({ displayName: 'ACR Resource ID', description: 'Optional: Resource ID of Azure Container Registry to grant pull access. Example: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerRegistry/registries/{name}', group: 'Configuration' })
@@ -84,6 +98,9 @@ resource vnet 'Microsoft.Network/virtualNetworks@2020-11-01' = {
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2020-08-01' = {
   name: logAnalyticsName
   location: location
+  properties: {
+    retentionInDays: logRetentionDays
+  }
 }
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2018-11-30' = {
@@ -393,6 +410,9 @@ resource containerApp 'Microsoft.App/containerApps@2022-03-01' = {
               { name: 'AZURE_TENANT_ID', value: subscription().tenantId }
               // Code server identity - reuses agent identity for simplicity
               { name: 'CODE_SERVER_IDENTITY_ID', value: identity.id }
+              // Default compute resources for code servers (overridable per code location)
+              { name: 'CODE_SERVER_CPU', value: codeServerCpu }
+              { name: 'CODE_SERVER_MEMORY', value: codeServerMemory }
             ]
         }
       ]
@@ -439,6 +459,141 @@ resource agentRoleAssignment 'Microsoft.Authorization/roleAssignments@2020-04-01
 // NOTE: Code servers are deployed as Container Apps in the SAME environment as the agent.
 // - Agent identity: Has Contributor role to create/manage Container Apps + needs AcrPull for images
 // - Code servers: Reuse the agent identity (assigned via CODE_SERVER_IDENTITY_ID)
+
+// Key Vault audit logs -> Log Analytics (always on)
+resource kvDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'kv-audit'
+  scope: keyVault
+  properties: {
+    workspaceId: logAnalytics.id
+    logs: [
+      { category: 'AuditEvent', enabled: true }
+    ]
+    metrics: [
+      { category: 'AllMetrics', enabled: true }
+    ]
+  }
+}
+
+// Resource locks (optional, default on)
+resource kvLock 'Microsoft.Authorization/locks@2017-04-01' = if (enableResourceLocks) {
+  name: '${keyVaultName}-lock'
+  scope: keyVault
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Locked to prevent accidental deletion of the Dagster agent Key Vault.'
+  }
+}
+
+resource identityLock 'Microsoft.Authorization/locks@2017-04-01' = if (enableResourceLocks) {
+  name: '${managedIdentityName}-lock'
+  scope: identity
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Locked to prevent accidental deletion of the Dagster agent managed identity.'
+  }
+}
+
+// Azure Monitor alerts (optional)
+resource alertActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (enableAlerts) {
+  name: 'dagster-alerts'
+  location: 'global'
+  properties: {
+    groupShortName: 'dagster'
+    enabled: true
+    emailReceivers: !empty(alertEmailAddress) ? [
+      {
+        name: 'email-receiver'
+        emailAddress: alertEmailAddress
+        useCommonAlertSchema: true
+      }
+    ] : []
+  }
+}
+
+resource agentRestartAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = if (enableAlerts) {
+  name: 'dagster-agent-restarts'
+  location: 'global'
+  properties: {
+    description: 'Dagster agent container has restarted.'
+    severity: 2
+    enabled: true
+    scopes: [ containerApp.id ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'RestartCount'
+          metricName: 'RestartCount'
+          operator: 'GreaterThan'
+          threshold: 0
+          timeAggregation: 'Total'
+          criterionType: 'StaticThresholdCriterion'
+        }
+      ]
+    }
+    actions: [ { actionGroupId: alertActionGroup.id } ]
+  }
+}
+
+resource agentReplicaAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = if (enableAlerts) {
+  name: 'dagster-agent-not-running'
+  location: 'global'
+  properties: {
+    description: 'Dagster agent has zero running replicas.'
+    severity: 1
+    enabled: true
+    scopes: [ containerApp.id ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT15M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'RunningReplicas'
+          metricName: 'RunningReplicaCount'
+          operator: 'LessThan'
+          threshold: 1
+          timeAggregation: 'Average'
+          criterionType: 'StaticThresholdCriterion'
+        }
+      ]
+    }
+    actions: [ { actionGroupId: alertActionGroup.id } ]
+  }
+}
+
+resource kvFailureAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = if (enableAlerts) {
+  name: 'dagster-keyvault-failures'
+  location: 'global'
+  properties: {
+    description: 'Key Vault API requests are failing — agent may be unable to fetch secrets.'
+    severity: 2
+    enabled: true
+    scopes: [ keyVault.id ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT15M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'ServiceApiResult'
+          metricName: 'ServiceApiResult'
+          operator: 'GreaterThan'
+          threshold: 0
+          timeAggregation: 'Total'
+          criterionType: 'StaticThresholdCriterion'
+          dimensions: [
+            { name: 'StatusCode', operator: 'Include', values: [ '4xx', '5xx' ] }
+          ]
+        }
+      ]
+    }
+    actions: [ { actionGroupId: alertActionGroup.id } ]
+  }
+}
 
 output containerAppResourceId string = containerApp.id
 output managedEnvironmentId string = env.id
