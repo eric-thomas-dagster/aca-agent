@@ -19,6 +19,7 @@ import logging
 import time
 import asyncio
 import hashlib
+import socket
 import threading
 import datetime
 from typing import Dict, Optional, List, Collection, NamedTuple
@@ -1338,29 +1339,38 @@ Or query Log Analytics:
                     hasattr(app, 'running_status') and
                     app.running_status == "Running"):
 
-                    # Try to connect to the gRPC server
-                    try:
-                        client = server_endpoint.create_client()
-                        # Simple health check - try to list repositories
-                        await asyncio.get_event_loop().run_in_executor(
-                            None,
-                            lambda: client.health_check_query()
-                        )
-                        logger.info(
-                            f"Server is ready: {server_handle.app_name}"
-                        )
-                        return
-                    except Exception as e:
-                        logger.info(
-                            f"Server not yet responding to gRPC (attempt {attempt + 1}): {e}"
-                        )
+                    # Validate connectivity with a raw TCP socket check rather
+                    # than the gRPC health_check_query(), which returns an error
+                    # string instead of raising — causing false "ready" reports.
+                    # A successful TCP handshake confirms the ACA internal ingress
+                    # is routing to the container and port 4000 is accepting
+                    # connections (there is a delay between the Container App
+                    # reaching "Running" and the ingress being fully configured).
+                    def _tcp_reachable(host: str, port: int, timeout: int = 5) -> bool:
+                        try:
+                            with socket.create_connection((host, port), timeout=timeout):
+                                return True
+                        except (socket.timeout, ConnectionRefusedError, OSError):
+                            return False
 
-                # Still provisioning or starting up
-                logger.info(
-                    f"Server not ready yet (attempt {attempt + 1}): "
-                    f"provisioning_state={app.provisioning_state}, "
-                    f"running_status={getattr(app, 'running_status', 'Unknown')}"
-                )
+                    reachable = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: _tcp_reachable(server_endpoint.host, server_endpoint.port),
+                    )
+                    if reachable:
+                        logger.info(f"Server is ready: {server_handle.app_name}")
+                        return
+                    logger.info(
+                        f"Container App running but port {server_endpoint.port} not yet "
+                        f"reachable on {server_endpoint.host} (attempt {attempt + 1})"
+                    )
+                else:
+                    # Still provisioning or starting up
+                    logger.info(
+                        f"Server not ready yet (attempt {attempt + 1}): "
+                        f"provisioning_state={app.provisioning_state}, "
+                        f"running_status={getattr(app, 'running_status', 'Unknown')}"
+                    )
 
             except Exception as e:
                 logger.info(
