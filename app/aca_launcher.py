@@ -199,13 +199,20 @@ class AcaRunLauncher(RunLauncher):
             EnvironmentVar(name="DAGSTER_RUN_ID", value=run_id),
         ]
 
-        # Copy environment variables from the code server
-        # The run needs the same env vars as the code server (API keys, storage config, etc.)
+        # Copy environment variables from the code server.
+        # The run needs the same env vars (API keys, storage config, etc.).
+        # We skip DAGSTER_CLOUD_CODE_LOCATION_NAME which is code-server-specific.
         if code_server_app.template.containers[0].env:
             for env_var in code_server_app.template.containers[0].env:
-                # Don't copy DAGSTER_CLOUD_CODE_LOCATION_NAME as it's not needed for runs
                 if env_var.name not in ["DAGSTER_CLOUD_CODE_LOCATION_NAME"]:
                     env_vars.append(env_var)
+
+        # Copy secrets from the code server so that any secretRef env vars work in
+        # the run worker container (ACA requires the secret to be declared in the
+        # same Container App's configuration.secrets list).
+        code_server_secrets = list(
+            code_server_app.configuration.secrets or []
+        ) if code_server_app.configuration else []
 
         # Build the command for executing the run
         # Following the OSS ECS/Docker launcher pattern from dagster-aws/dagster-docker
@@ -263,7 +270,7 @@ class AcaRunLauncher(RunLauncher):
             configuration=Configuration(
                 # No ingress - runs don't need external access
                 ingress=None,
-                secrets=[],
+                secrets=code_server_secrets,
                 registries=registries,
                 active_revisions_mode="Single",
             ),
@@ -469,6 +476,9 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         self.location = _expand_env_var(config.get("location"), "AZURE_LOCATION", "eastus")
         self.cpu = config.get("cpu", 0.5)
         self.memory = config.get("memory", "1.0Gi")
+        # Launcher-level env vars forwarded to every code server (KEY=VALUE strings).
+        # Corresponds to env_vars in dagster.yaml user_code_launcher config.
+        self.env_vars: List[str] = config.get("env_vars") or []
 
         # Azure policy-required tags (can be configured via environment or config)
         self.required_tags = config.get("tags", {})
@@ -512,6 +522,7 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
 
     @classmethod
     def config_type(cls):
+        from dagster import Field
         return {
             "subscription_id": str,
             "resource_group": str,
@@ -519,6 +530,8 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
             "location": str,
             "cpu": float,
             "memory": str,
+            # Optional list of KEY=VALUE strings forwarded to every code server.
+            "env_vars": Field([str], is_required=False, default_value=[]),
         }
 
     @classmethod
@@ -759,12 +772,16 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
             # Update container image
             existing_app.template.containers[0].image = image
 
-            # Update environment variables if provided
+            # Merge environment variables rather than replacing the entire list so that
+            # required Dagster Cloud vars (DAGSTER_CLOUD_*) set during spinup are preserved.
             if environment_variables:
-                env_vars = []
+                existing_env: Dict[str, EnvironmentVar] = {
+                    ev.name: ev
+                    for ev in (existing_app.template.containers[0].env or [])
+                }
                 for key, value in environment_variables.items():
-                    env_vars.append(EnvironmentVar(name=key, value=value))
-                existing_app.template.containers[0].env = env_vars
+                    existing_env[key] = EnvironmentVar(name=key, value=value)
+                existing_app.template.containers[0].env = list(existing_env.values())
 
             # Apply update (triggers blue-green deployment)
             poller = self.aca_client.container_apps.begin_create_or_update(
@@ -881,34 +898,62 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         self,
         deployment_name: str,
         location_name: str,
-        custom_env: Optional[Dict[str, str]] = None
+        cloud_context_env: Optional[Dict[str, str]] = None,
+        container_context_env_vars: Optional[List[str]] = None,
     ) -> List[EnvironmentVar]:
         """
         Build environment variables list for the code server container.
 
+        Sources are merged in increasing priority order so that more specific
+        settings override more general ones:
+          1. Base Dagster Cloud vars (deployment name, location name, URL)
+          2. Launcher-level env_vars from dagster.yaml config (KEY=VALUE strings)
+          3. Deployment-level cloud_context_env from Dagster Cloud platform
+          4. Code location containerContext env_vars (KEY=VALUE strings)
+          5. DAGSTER_GRPC_MAX_WORKERS from the agent process environment
+
         Args:
             deployment_name: Dagster deployment name
             location_name: Code location name
-            custom_env: Additional environment variables
+            cloud_context_env: Env vars injected by the Dagster Cloud platform
+                (includes DAGSTER_CLOUD_API_TOKEN and other agent-assigned vars)
+            container_context_env_vars: KEY=VALUE strings from the code location's
+                containerContext configuration (highest user-controlled precedence)
 
         Returns:
             List of EnvironmentVar objects
         """
-        env_vars = [
-            EnvironmentVar(name="DAGSTER_CLOUD_DEPLOYMENT_NAME", value=deployment_name),
-            EnvironmentVar(name="DAGSTER_CLOUD_CODE_LOCATION_NAME", value=location_name),
-            EnvironmentVar(
-                name="DAGSTER_CLOUD_URL",
-                value=os.getenv("DAGSTER_CLOUD_URL", "https://dagster.cloud")
-            ),
-        ]
+        # Use a dict so later layers silently override earlier ones.
+        env: Dict[str, str] = {}
 
-        # Add custom environment variables
-        if custom_env:
-            for key, value in custom_env.items():
-                env_vars.append(EnvironmentVar(name=key, value=value))
+        # 1. Base vars
+        env["DAGSTER_CLOUD_DEPLOYMENT_NAME"] = deployment_name
+        env["DAGSTER_CLOUD_CODE_LOCATION_NAME"] = location_name
+        env["DAGSTER_CLOUD_URL"] = os.getenv("DAGSTER_CLOUD_URL", "https://dagster.cloud")
 
-        return env_vars
+        # 2. Launcher-level env_vars (KEY=VALUE strings configured in dagster.yaml)
+        for entry in self.env_vars:
+            if "=" in entry:
+                k, v = entry.split("=", 1)
+                env[k.strip()] = v
+
+        # 3. Deployment-level env vars from Dagster Cloud (e.g. DAGSTER_CLOUD_API_TOKEN)
+        if cloud_context_env:
+            env.update(cloud_context_env)
+
+        # 4. Code location containerContext env_vars (KEY=VALUE strings)
+        if container_context_env_vars:
+            for entry in container_context_env_vars:
+                if "=" in entry:
+                    k, v = entry.split("=", 1)
+                    env[k.strip()] = v
+
+        # 5. Forward DAGSTER_GRPC_MAX_WORKERS if set on the agent
+        grpc_max_workers = os.environ.get("DAGSTER_GRPC_MAX_WORKERS")
+        if grpc_max_workers:
+            env["DAGSTER_GRPC_MAX_WORKERS"] = grpc_max_workers
+
+        return [EnvironmentVar(name=k, value=v) for k, v in env.items()]
 
     def scale_code_server(self, app_name: str, min_replicas: int = 1, max_replicas: int = 1):
         """
@@ -1107,17 +1152,21 @@ Or query Log Analytics:
             f"location={location_name}, image={image}, app={app_name}"
         )
 
-        # Build environment variables
-        env_vars = self._build_environment_variables(
-            deployment_name,
-            location_name,
-            code_location_deploy_data.cloud_context_env
-        )
-
-        # Get resource configuration
+        # Extract resource and env configuration from the code location's containerContext.
         container_context = code_location_deploy_data.container_context or {}
         cpu = container_context.get("cpu", self.cpu)
         memory = container_context.get("memory", self.memory)
+        # env_vars in containerContext are KEY=VALUE strings set by the user in
+        # dagster_cloud.yaml or the Dagster Cloud UI code location settings.
+        container_context_env_vars = container_context.get("env_vars", [])
+
+        # Build environment variables from all sources
+        env_vars = self._build_environment_variables(
+            deployment_name,
+            location_name,
+            cloud_context_env=code_location_deploy_data.cloud_context_env,
+            container_context_env_vars=container_context_env_vars,
+        )
 
         # Get agent ID for tracking
         agent_id = self._instance.instance_uuid if hasattr(self, '_instance') and self._instance else None
