@@ -1128,9 +1128,45 @@ Or query Log Analytics:
         """
         Shut down resources associated with the given handle.
 
-        This deletes the Container App.
+        This deletes the Container App, unless it has already been taken over by
+        a newer spinup.  Since we update Container Apps in-place via create_or_update
+        (same app_name), the "old" handle and the "new" handle point to the same Azure
+        resource.  The base class calls _remove_server_handle for the old handle right
+        after the new server is ready — without this guard that would DELETE the live
+        Container App, triggering an infinite create→delete→create cycle.
         """
         logger.info(f"Removing server: {server_handle.app_name}")
+        try:
+            # Before deleting, verify the Container App still belongs to the handle
+            # we were asked to remove.  If its dagster-agent-id tag has changed, a
+            # newer _start_new_server_spinup already claimed it — skip deletion.
+            current_app = self.aca_client.container_apps.get(
+                resource_group_name=self.resource_group,
+                container_app_name=server_handle.app_name,
+            )
+            current_agent_id = (current_app.tags or {}).get("dagster-agent-id")
+            if current_agent_id != server_handle.agent_id:
+                logger.info(
+                    f"Skipping removal of {server_handle.app_name}: "
+                    f"Container App has been taken over by a newer spinup "
+                    f"(current agent_id={current_agent_id}, "
+                    f"handle agent_id={server_handle.agent_id}). "
+                    "The live server will not be deleted."
+                )
+                return
+        except Exception as check_err:
+            err_str = str(check_err)
+            if "ResourceNotFound" in err_str or "404" in err_str:
+                logger.info(
+                    f"Container App {server_handle.app_name} already gone, "
+                    "nothing to remove."
+                )
+                return
+            logger.warning(
+                f"Could not verify ownership of {server_handle.app_name} "
+                f"before removal ({check_err}); proceeding with delete."
+            )
+
         try:
             self.terminate_code_server(server_handle.app_name)
         except Exception as e:
