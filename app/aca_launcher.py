@@ -946,17 +946,42 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         if cloud_context_env:
             env.update(cloud_context_env)
 
-        # 4. Code location containerContext env_vars (KEY=VALUE strings)
+        # 4. Code location containerContext env_vars.
+        # Each entry is "KEY=VALUE" (literal) or "KEY" (forward from agent env).
         if container_context_env_vars:
             for entry in container_context_env_vars:
                 if "=" in entry:
                     k, v = entry.split("=", 1)
                     env[k.strip()] = v
+                else:
+                    key = entry.strip()
+                    if key:
+                        agent_val = os.environ.get(key)
+                        if agent_val is not None:
+                            env[key] = agent_val
+                        else:
+                            logger.warning(
+                                f"containerContext env_var '{key}' is not set in the "
+                                "agent's environment — it will not be forwarded to the "
+                                "code server. Set it on the agent Container App."
+                            )
 
         # 5. Forward DAGSTER_GRPC_MAX_WORKERS if set on the agent
         grpc_max_workers = os.environ.get("DAGSTER_GRPC_MAX_WORKERS")
         if grpc_max_workers:
             env["DAGSTER_GRPC_MAX_WORKERS"] = grpc_max_workers
+
+        # Log what is being injected so operators can verify env var forwarding.
+        # Mask values that look like secrets (tokens, keys, passwords).
+        _SECRET_PATTERNS = ("token", "key", "secret", "password", "credential")
+        loggable = {
+            k: ("***" if any(p in k.lower() for p in _SECRET_PATTERNS) else v)
+            for k, v in env.items()
+        }
+        logger.info(
+            f"Code server env vars for {location_name}: {list(loggable.keys())} "
+            f"(values: {loggable})"
+        )
 
         return [EnvironmentVar(name=k, value=v) for k, v in env.items()]
 
@@ -1206,9 +1231,20 @@ Or query Log Analytics:
         container_context = code_location_deploy_data.container_context or {}
         cpu = container_context.get("cpu", self.cpu)
         memory = container_context.get("memory", self.memory)
-        # env_vars in containerContext are KEY=VALUE strings set by the user in
-        # dagster_cloud.yaml or the Dagster Cloud UI code location settings.
-        container_context_env_vars = container_context.get("env_vars", [])
+
+        # Collect env_vars from all containerContext namespaces.
+        # Dagster Cloud stores code-location env vars under the launcher-specific
+        # key (e.g. "k8s" for the k8s agent).  For maximum compatibility we
+        # accept env_vars at the top level AND inside any nested dict value.
+        # Each entry is either:
+        #   "KEY=VALUE"  → set that key/value literally
+        #   "KEY"        → forward the value of KEY from the agent's environment
+        container_context_env_vars: List[str] = list(container_context.get("env_vars") or [])
+        for _ns_key, _ns_val in container_context.items():
+            if isinstance(_ns_val, dict):
+                for entry in _ns_val.get("env_vars") or []:
+                    if entry not in container_context_env_vars:
+                        container_context_env_vars.append(entry)
 
         # Build environment variables from all sources
         env_vars = self._build_environment_variables(
