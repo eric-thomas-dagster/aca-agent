@@ -1194,13 +1194,17 @@ Or query Log Analytics:
                 user_assigned_identities={self.code_server_identity_id: UserAssignedIdentity()}
             ) if self.code_server_identity_id else None,
             configuration=Configuration(
-                # Internal ingress — agent and code servers share the same ACA
-                # environment so internal connectivity is sufficient. External TCP
-                # ingress requires a custom VNET (ContainerAppTcpRequiresVnet).
+                # Internal HTTP/2 ingress — gRPC runs over HTTP/2 (h2c).
+                # Using transport=http2 with external=False:
+                #   - No VNET required (unlike TCP transport which needs VNET for
+                #     inter-container access, causing ContainerAppTcpRequiresVnet).
+                #   - ACA exposes the app on the target port (4000) internally via h2c.
+                #   - The agent connects insecurely to internal-fqdn:4000, which is
+                #     exactly what gRPC's insecure_channel expects.
                 ingress=Ingress(
                     external=False,
                     target_port=4000,
-                    transport="tcp",
+                    transport="http2",
                 ),
                 # Registry credentials (if needed for private registries)
                 secrets=secrets,
