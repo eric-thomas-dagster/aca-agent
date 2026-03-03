@@ -971,18 +971,6 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         if grpc_max_workers:
             env["DAGSTER_GRPC_MAX_WORKERS"] = grpc_max_workers
 
-        # Log what is being injected so operators can verify env var forwarding.
-        # Mask values that look like secrets (tokens, keys, passwords).
-        _SECRET_PATTERNS = ("token", "key", "secret", "password", "credential")
-        loggable = {
-            k: ("***" if any(p in k.lower() for p in _SECRET_PATTERNS) else v)
-            for k, v in env.items()
-        }
-        logger.info(
-            f"Code server env vars for {location_name}: {list(loggable.keys())} "
-            f"(values: {loggable})"
-        )
-
         return [EnvironmentVar(name=k, value=v) for k, v in env.items()]
 
     def scale_code_server(self, app_name: str, min_replicas: int = 1, max_replicas: int = 1):
