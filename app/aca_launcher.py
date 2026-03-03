@@ -1024,6 +1024,20 @@ Or query Log Analytics:
     # Abstract Method Implementations (Required by DagsterCloudUserCodeLauncher)
     # =========================================================================
 
+    @staticmethod
+    def _app_name(deployment_name: str, location_name: str) -> str:
+        """Deterministically compute the Container App name for a code location.
+
+        ACA naming rules: lowercase alphanumeric + hyphens, max 32 chars.
+        If the raw name exceeds 32 chars a 7-char hash suffix is appended so that
+        different (deployment, location) pairs never silently share the same name.
+        """
+        raw = f"dagster-{deployment_name}-{location_name}".lower().replace("_", "-")
+        if len(raw) > 32:
+            suffix = hashlib.sha256(raw.encode()).hexdigest()[:7]
+            return f"{raw[:24]}-{suffix}"
+        return raw
+
     def _get_standalone_dagster_server_handles_for_location(
         self, deployment_name: str, location_name: str
     ) -> Collection[AcaServerHandle]:
@@ -1031,41 +1045,41 @@ Or query Log Analytics:
         Return a list of handles representing all running servers for a given location.
 
         This method is called during reconciliation to discover existing code servers.
+
+        Uses container_apps.get() with a deterministic name rather than list_by_resource_group()
+        so that in-progress Container Apps (provisioning_state=InProgress) are discovered
+        immediately — list operations may omit resources that have not yet reached a terminal
+        provisioning state, which would cause the reconciler to issue a second concurrent
+        begin_create_or_update and trigger Azure to cancel the first one.
         """
-        handles = []
+        app_name = self._app_name(deployment_name, location_name)
         try:
-            # List all Container Apps in the resource group
-            apps = self.aca_client.container_apps.list_by_resource_group(
-                resource_group_name=self.resource_group
+            app = self.aca_client.container_apps.get(
+                resource_group_name=self.resource_group,
+                container_app_name=app_name,
             )
-
-            # Filter for code servers matching this deployment and location
-            for app in apps:
-                if not app.tags or app.tags.get("managed-by") != "dagster-cloud-agent":
-                    continue
-
-                if (app.tags.get("dagster-deployment") == deployment_name and
-                    app.tags.get("dagster-location") == location_name):
-
-                    # Extract metadata from tags
-                    agent_id = app.tags.get("dagster-agent-id")
-                    update_timestamp_str = app.tags.get("dagster-update-timestamp")
-                    update_timestamp = float(update_timestamp_str) if update_timestamp_str else time.time()
-
-                    handles.append(AcaServerHandle(
-                        app_name=app.name,
-                        deployment_name=deployment_name,
-                        location_name=location_name,
-                        agent_id=agent_id,
-                        update_timestamp=update_timestamp
-                    ))
-
-            return handles
-
-        except Exception as e:
-            logger.error(
-                f"Failed to get server handles for {deployment_name}:{location_name}: {e}"
+            ps = app.provisioning_state or ""
+            if ps in ("Failed", "Canceled"):
+                logger.info(
+                    f"Container App {app_name} has terminal state={ps}, "
+                    "discarding stale handle so reconciler can recreate it"
+                )
+                return []
+            agent_id = (app.tags or {}).get("dagster-agent-id")
+            update_timestamp_str = (app.tags or {}).get("dagster-update-timestamp")
+            update_timestamp = float(update_timestamp_str) if update_timestamp_str else time.time()
+            logger.info(
+                f"Found existing Container App {app_name} "
+                f"(provisioning_state={ps}) for {deployment_name}:{location_name}"
             )
+            return [AcaServerHandle(
+                app_name=app_name,
+                deployment_name=deployment_name,
+                location_name=location_name,
+                agent_id=agent_id,
+                update_timestamp=update_timestamp,
+            )]
+        except Exception:
             return []
 
     def _list_server_handles(self) -> List[AcaServerHandle]:
@@ -1140,13 +1154,8 @@ Or query Log Analytics:
                 "Azure Container Apps launcher requires container images."
             )
 
-        # Generate Container App name (same collision-safe logic as the code-server launcher).
-        raw = f"dagster-{deployment_name}-{location_name}".lower().replace("_", "-")
-        if len(raw) > 32:
-            suffix = hashlib.sha256(raw.encode()).hexdigest()[:7]
-            app_name = f"{raw[:24]}-{suffix}"
-        else:
-            app_name = raw
+        # Generate Container App name via shared helper.
+        app_name = self._app_name(deployment_name, location_name)
 
         logger.info(
             f"Starting server spinup: deployment={deployment_name}, "
@@ -1228,21 +1237,55 @@ Or query Log Analytics:
         )
 
         try:
-            # Start the Container App creation (async operation)
-            poller = self.aca_client.container_apps.begin_create_or_update(
-                resource_group_name=self.resource_group,
-                container_app_name=app_name,
-                container_app_envelope=container_app
-            )
-
-            # Wait for the initial creation to start
-            # (We'll wait for full readiness in _wait_for_new_server_ready)
-            result = poller.result(timeout=180)
-
-            logger.info(
-                f"Server spinup started: {app_name} "
-                f"(provisioning_state={result.provisioning_state})"
-            )
+            # Guard against concurrent Azure LRO conflicts.
+            # If the reconciler fires again while a previous begin_create_or_update is still
+            # in flight, a second call on the same Container App causes Azure to cancel the
+            # first operation (status "Canceled").  We avoid this by checking whether the app
+            # already exists in a non-terminal state and skipping the create in that case.
+            # _wait_for_new_server_ready will then poll until the in-flight operation finishes.
+            try:
+                existing = self.aca_client.container_apps.get(
+                    resource_group_name=self.resource_group,
+                    container_app_name=app_name,
+                )
+                ps = existing.provisioning_state or ""
+                if ps not in ("Failed", "Canceled"):
+                    logger.info(
+                        f"Container App {app_name} already exists "
+                        f"(provisioning_state={ps}), skipping begin_create_or_update"
+                    )
+                    # Jump straight to building the server handle below.
+                    # _wait_for_new_server_ready will poll until the app is ready.
+                else:
+                    logger.info(
+                        f"Container App {app_name} in terminal state {ps}, will recreate"
+                    )
+                    poller = self.aca_client.container_apps.begin_create_or_update(
+                        resource_group_name=self.resource_group,
+                        container_app_name=app_name,
+                        container_app_envelope=container_app,
+                    )
+                    result = poller.result(timeout=180)
+                    logger.info(
+                        f"Server spinup started: {app_name} "
+                        f"(provisioning_state={result.provisioning_state})"
+                    )
+            except Exception as check_err:
+                # App doesn't exist yet (404) or GET failed — proceed with create.
+                if "ResourceNotFound" in str(check_err) or "Not Found" in str(check_err) or "404" in str(check_err):
+                    logger.info(f"Container App {app_name} does not exist, creating...")
+                    poller = self.aca_client.container_apps.begin_create_or_update(
+                        resource_group_name=self.resource_group,
+                        container_app_name=app_name,
+                        container_app_envelope=container_app,
+                    )
+                    result = poller.result(timeout=180)
+                    logger.info(
+                        f"Server spinup started: {app_name} "
+                        f"(provisioning_state={result.provisioning_state})"
+                    )
+                else:
+                    raise
 
             # Create server handle
             server_handle = AcaServerHandle(
@@ -1334,10 +1377,12 @@ Or query Log Analytics:
                     container_app_name=server_handle.app_name
                 )
 
-                # Check if app is provisioned and running
+                # Check if app is provisioned and running.
+                # running_status known values: Progressing, Running, Stopped, Suspended, Ready.
+                # Accept both "Running" and "Ready" as healthy states.
+                running_status = getattr(app, 'running_status', None)
                 if (app.provisioning_state == "Succeeded" and
-                    hasattr(app, 'running_status') and
-                    app.running_status == "Running"):
+                    running_status in ("Running", "Ready")):
 
                     # Validate connectivity with a raw TCP socket check rather
                     # than the gRPC health_check_query(), which returns an error
@@ -1369,7 +1414,7 @@ Or query Log Analytics:
                     logger.info(
                         f"Server not ready yet (attempt {attempt + 1}): "
                         f"provisioning_state={app.provisioning_state}, "
-                        f"running_status={getattr(app, 'running_status', 'Unknown')}"
+                        f"running_status={running_status or 'Unknown'}"
                     )
 
             except Exception as e:
