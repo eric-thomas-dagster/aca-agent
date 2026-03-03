@@ -19,7 +19,6 @@ import logging
 import time
 import asyncio
 import hashlib
-import socket
 import threading
 import datetime
 from typing import Dict, Optional, List, Collection, NamedTuple
@@ -1411,31 +1410,26 @@ Or query Log Analytics:
                 if (app.provisioning_state == "Succeeded" and
                     running_status in ("Running", "Ready")):
 
-                    # Validate connectivity with a raw TCP socket check rather
-                    # than the gRPC health_check_query(), which returns an error
-                    # string instead of raising — causing false "ready" reports.
-                    # A successful TCP handshake confirms the ACA internal ingress
-                    # is routing to the container and port 4000 is accepting
-                    # connections (there is a delay between the Container App
-                    # reaching "Running" and the ingress being fully configured).
-                    def _tcp_reachable(host: str, port: int, timeout: int = 5) -> bool:
-                        try:
-                            with socket.create_connection((host, port), timeout=timeout):
-                                return True
-                        except (socket.timeout, ConnectionRefusedError, OSError):
-                            return False
-
-                    reachable = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: _tcp_reachable(server_endpoint.host, server_endpoint.port),
-                    )
-                    if reachable:
+                    # ACA's HTTP/2 proxy on port 80 starts listening BEFORE the
+                    # container is healthy.  A plain TCP check passes prematurely
+                    # and ACA returns 404 HTML (gRPC StatusCode.UNIMPLEMENTED) until
+                    # the container passes its health check.  We do a real gRPC
+                    # ping so we only declare the server ready once the Dagster gRPC
+                    # server is actually responding inside the container.
+                    try:
+                        grpc_client = server_endpoint.create_client()
+                        await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: grpc_client.ping(echo="readiness"),
+                        )
                         logger.info(f"Server is ready: {server_handle.app_name}")
                         return
-                    logger.info(
-                        f"Container App running but port {server_endpoint.port} not yet "
-                        f"reachable on {server_endpoint.host} (attempt {attempt + 1})"
-                    )
+                    except Exception as ping_err:
+                        logger.info(
+                            f"Container App running but gRPC ping not yet ready on "
+                            f"{server_endpoint.host}:{server_endpoint.port} "
+                            f"(attempt {attempt + 1}): {type(ping_err).__name__}"
+                        )
                 else:
                     # Still provisioning or starting up
                     logger.info(
