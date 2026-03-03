@@ -1200,16 +1200,19 @@ Or query Log Analytics:
             ) if self.code_server_identity_id else None,
             configuration=Configuration(
                 # Internal HTTP/2 ingress — gRPC runs over HTTP/2 (h2c).
-                # Using transport=http2 with external=False:
+                # Using transport=http2 with external=False and allow_insecure=True:
                 #   - No VNET required (unlike TCP transport which needs VNET for
                 #     inter-container access, causing ContainerAppTcpRequiresVnet).
-                #   - ACA exposes the app on the target port (4000) internally via h2c.
-                #   - The agent connects insecurely to internal-fqdn:4000, which is
-                #     exactly what gRPC's insecure_channel expects.
+                #   - allow_insecure=True makes ACA expose the proxy on port 80 (h2c).
+                #     Without it, ACA only exposes port 443 (HTTPS), and the target
+                #     port (4000) is NOT directly reachable as a TCP socket.
+                #   - The agent connects insecurely to internal-fqdn:80 via h2c,
+                #     which is exactly what gRPC's insecure_channel expects.
                 ingress=Ingress(
                     external=False,
                     target_port=4000,
                     transport="http2",
+                    allow_insecure=True,
                 ),
                 # Registry credentials (if needed for private registries)
                 secrets=secrets,
@@ -1258,16 +1261,23 @@ Or query Log Analytics:
                     container_app_name=app_name,
                 )
                 ps = existing.provisioning_state or ""
-                if ps not in ("Failed", "Canceled"):
+                # Only skip create/update when an LRO is actively in flight.
+                # If the app is in a terminal state (Succeeded, Failed, Canceled),
+                # we must issue begin_create_or_update so config changes (e.g.
+                # allow_insecure, image updates) are applied.  Skipping for
+                # Succeeded was too broad and blocked all config updates.
+                _TRANSITIONAL = {"InProgress", "Deleting"}
+                if ps in _TRANSITIONAL:
                     logger.info(
                         f"Container App {app_name} already exists "
-                        f"(provisioning_state={ps}), skipping begin_create_or_update"
+                        f"(provisioning_state={ps}), skipping begin_create_or_update — "
+                        "LRO in flight, _wait_for_new_server_ready will poll."
                     )
                     # Jump straight to building the server handle below.
                     # _wait_for_new_server_ready will poll until the app is ready.
                 else:
                     logger.info(
-                        f"Container App {app_name} in terminal state {ps}, will recreate"
+                        f"Container App {app_name} exists with state={ps}, issuing create_or_update"
                     )
                     poller = self.aca_client.container_apps.begin_create_or_update(
                         resource_group_name=self.resource_group,
@@ -1319,25 +1329,33 @@ Or query Log Analytics:
                 app.configuration.ingress.fqdn
             ) else app_name
 
-            # Determine the correct port based on ingress configuration
-            # - TCP transport: Always use target port 4000 (exposes port directly)
-            # - HTTP/2 transport with external ingress: Use port 443 (HTTPS)
-            # - HTTP/2 transport with internal ingress: Use port 4000
+            # Determine the correct port based on ingress configuration.
+            # ACA HTTP/2 ingress does NOT expose the target port (4000) as a raw
+            # TCP socket.  The ACA proxy listens on:
+            #   - port 80  when allow_insecure=True  (h2c — plaintext HTTP/2)
+            #   - port 443 when allow_insecure=False (HTTPS)
+            # For internal gRPC via insecure_channel we want port 80 (h2c).
             transport = (app.configuration and
                         app.configuration.ingress and
                         app.configuration.ingress.transport) or "tcp"
             is_external = (app.configuration and
                           app.configuration.ingress and
                           app.configuration.ingress.external)
+            allow_insecure = bool(
+                app.configuration and
+                app.configuration.ingress and
+                app.configuration.ingress.allow_insecure
+            )
 
-            # TCP transport always uses target port (4000)
-            # HTTP/2 external uses 443, HTTP/2 internal uses 4000
             if transport.lower() == "tcp":
+                # TCP transport exposes the target port directly.
                 port = 4000
-            elif is_external:
-                port = 443
+            elif allow_insecure:
+                # HTTP/2 + allow_insecure=True → h2c proxy on port 80.
+                port = 80
             else:
-                port = 4000
+                # HTTP/2 without allow_insecure → HTTPS proxy on port 443.
+                port = 443
 
             logger.info(f"Connecting to {host}:{port} (transport={transport}, external={is_external})")
 
