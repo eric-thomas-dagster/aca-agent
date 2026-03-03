@@ -1184,11 +1184,13 @@ Or query Log Analytics:
                 user_assigned_identities={self.code_server_identity_id: UserAssignedIdentity()}
             ) if self.code_server_identity_id else None,
             configuration=Configuration(
-                # Enable ingress for gRPC communication with VNET
+                # Internal ingress — agent and code servers share the same ACA
+                # environment so internal connectivity is sufficient. External TCP
+                # ingress requires a custom VNET (ContainerAppTcpRequiresVnet).
                 ingress=Ingress(
-                    external=True,  # External ingress for VNET connectivity
-                    target_port=4000,  # Standard Dagster gRPC port
-                    transport="tcp",  # TCP transport for direct gRPC connection
+                    external=False,
+                    target_port=4000,
+                    transport="tcp",
                 ),
                 # Registry credentials (if needed for private registries)
                 secrets=secrets,
