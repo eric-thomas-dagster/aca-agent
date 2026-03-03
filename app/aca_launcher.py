@@ -823,8 +823,13 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
             logger.info(f"Successfully terminated code server: {app_name}")
 
         except Exception as e:
-            logger.error(f"Failed to terminate code server {app_name}: {e}")
-            raise
+            err_str = str(e)
+            if "ResourceNotFound" in err_str or "404" in err_str:
+                # Already deleted — treat as success.
+                logger.info(f"Container App {app_name} was already deleted, nothing to terminate")
+            else:
+                logger.error(f"Failed to terminate code server {app_name}: {e}")
+                raise
 
     def get_code_server_status(self, app_name: str) -> Dict:
         """
@@ -1422,6 +1427,16 @@ Or query Log Analytics:
                     )
 
             except Exception as e:
+                err_str = str(e)
+                if "ResourceNotFound" in err_str or "404" in err_str:
+                    # Container App was deleted (e.g. manually in the portal, or by a
+                    # concurrent reconcile cycle). No point continuing to poll — raise
+                    # immediately so the base class can recreate it.
+                    raise RuntimeError(
+                        f"Container App {server_handle.app_name} no longer exists "
+                        f"(ResourceNotFound on attempt {attempt + 1}). "
+                        "Will recreate on next reconcile."
+                    ) from e
                 logger.info(
                     f"Error checking server status (attempt {attempt + 1}): {e}"
                 )
