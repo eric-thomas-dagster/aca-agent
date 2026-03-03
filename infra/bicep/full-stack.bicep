@@ -49,8 +49,8 @@ param dagsterDeploymentNameSecretValue string = ''
 @secure()
 @metadata({ displayName: 'Organization ID (value)', description: 'Optional organization ID value to store in Key Vault (if dagsterOrgIdSecretName is provided).', group: 'Secrets' })
 param dagsterOrgIdSecretValue string = ''
-@metadata({ displayName: 'Agent vCPU', description: 'vCPU for the agent container (use Azure-native fractional CPUs, e.g. 0.25, 0.5, 1).', group: 'Compute' })
-param agentCpu string = '0.25'
+@metadata({ displayName: 'Agent vCPU', description: 'vCPU for the agent container. Must form a valid ACA pair with agentMemory: 0.25→0.5Gi, 0.5→1.0Gi, 0.75→1.5Gi, 1.0→2.0Gi.', group: 'Compute' })
+param agentCpu string = '0.5'
 @metadata({ displayName: 'Agent Memory', description: 'Memory for the agent container expressed in Gi/Mi (e.g. \'1.0Gi\').', group: 'Compute' })
 param agentMemory string = '1.0Gi'
 @minValue(1)
