@@ -170,6 +170,11 @@ def main():
 
     logging.info("=" * 60)
 
+    # Suppress verbose Azure SDK HTTP request/response logging.
+    # The azure.* loggers log every request URL, headers, and response at INFO
+    # level, which floods the logs. WARNING is sufficient for production.
+    logging.getLogger("azure").setLevel(logging.WARNING)
+
     logging.info("Starting Dagster Cloud Agent programmatically")
 
     # Import and start the agent directly instead of exec'ing

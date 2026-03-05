@@ -46,8 +46,10 @@ dagster_cloud_api:
   # EU:  https://{org}.agent.eu.dagster.cloud
   url: https://${DAGSTER_CLOUD_ORG_ID}.agent.${DAGSTER_CLOUD_BASE_DOMAIN:dagster.cloud}
 
-  # Deployment name
-  deployment: ${DAGSTER_CLOUD_DEPLOYMENT_NAME:prod}
+  # Deployment name — must be set explicitly (e.g. "prod", "aca", "staging")
+  # There is no safe default: using the wrong deployment causes code servers to
+  # receive that deployment's env vars, not the intended one's.
+  deployment: ${DAGSTER_CLOUD_DEPLOYMENT_NAME}
 
 # Logging configuration
 python_logs:
@@ -58,7 +60,6 @@ python_logs:
   managed_python_loggers:
     - dagster_cloud
     - aca_launcher
-    - azure.mgmt.appcontainers
 
 # Optional: Run launcher for executing runs
 # By default, code servers handle run execution
