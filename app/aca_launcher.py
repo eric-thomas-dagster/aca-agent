@@ -55,6 +55,29 @@ from azure.mgmt.appcontainers.models import (
 logger = logging.getLogger(__name__)
 
 
+class _SkipLocationFilter(logging.Filter):
+    """Suppress base-class ERROR logs for locations not managed by this agent.
+
+    The base class (_reconcile) catches every exception from _start_new_server_spinup
+    and logs it at ERROR level with a stack trace.  For serverless/pex and ECR locations
+    we intentionally raise — we don't manage them — and we log a clear INFO beforehand.
+    The base-class ERROR is pure noise; suppress it.
+    """
+
+    _SKIP_KEYWORDS = (
+        "no container image configured",
+        "AWS ECR",
+        "Dagster Cloud Serverless",
+        "not managed by this Azure hybrid agent",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno == logging.ERROR:
+            if any(kw in record.getMessage() for kw in self._SKIP_KEYWORDS):
+                return False  # suppress
+        return True
+
+
 class AcaRunLauncher(RunLauncher):
     """
     Run launcher for Azure Container Apps.
@@ -511,6 +534,16 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
 
         # Get managed environment ID
         self.environment_id = self._get_environment_id()
+
+        # In-memory map of app_name -> agent_id for the most recent spinup.
+        # Used by _remove_server_handle to skip deletion when a newer spinup has
+        # claimed the same Container App — even when the Azure tag wasn't updated
+        # (e.g. because begin_create_or_update was skipped due to a transitional LRO).
+        self._active_server_ids: Dict[str, str] = {}
+
+        # Suppress base-class ERROR logs for locations we intentionally skip
+        # (serverless/pex with no image, or ECR images managed by Dagster Serverless).
+        logging.getLogger("dagster_cloud").addFilter(_SkipLocationFilter())
 
         logger.info(
             f"Initialized AcaUserCodeLauncher: rg={self.resource_group}, "
@@ -1146,24 +1179,37 @@ Or query Log Analytics:
         resource.  The base class calls _remove_server_handle for the old handle right
         after the new server is ready — without this guard that would DELETE the live
         Container App, triggering an infinite create→delete→create cycle.
+
+        The primary guard uses _active_server_ids (in-memory), which is updated by
+        every _start_new_server_spinup call regardless of whether begin_create_or_update
+        was issued.  The Azure tag check is kept as a secondary belt-and-suspenders guard.
         """
         logger.info(f"Removing server: {server_handle.app_name}")
+
+        # Primary guard: in-memory registry updated on every spinup (even when
+        # begin_create_or_update was skipped due to a transitional LRO state).
+        active_id = self._active_server_ids.get(server_handle.app_name)
+        if active_id is not None and active_id != server_handle.agent_id:
+            logger.info(
+                f"Skipping removal of {server_handle.app_name}: "
+                f"in-memory registry shows a newer spinup owns this Container App "
+                f"(active_id={active_id}, handle agent_id={server_handle.agent_id})."
+            )
+            return
+
+        # Secondary guard: verify via the Container App's Azure tag.
         try:
-            # Before deleting, verify the Container App still belongs to the handle
-            # we were asked to remove.  If its dagster-agent-id tag has changed, a
-            # newer _start_new_server_spinup already claimed it — skip deletion.
             current_app = self.aca_client.container_apps.get(
                 resource_group_name=self.resource_group,
                 container_app_name=server_handle.app_name,
             )
             current_agent_id = (current_app.tags or {}).get("dagster-agent-id")
-            if current_agent_id != server_handle.agent_id:
+            if current_agent_id is not None and current_agent_id != server_handle.agent_id:
                 logger.info(
                     f"Skipping removal of {server_handle.app_name}: "
-                    f"Container App has been taken over by a newer spinup "
-                    f"(current agent_id={current_agent_id}, "
-                    f"handle agent_id={server_handle.agent_id}). "
-                    "The live server will not be deleted."
+                    f"Azure tag shows a newer spinup owns this Container App "
+                    f"(tag agent_id={current_agent_id}, "
+                    f"handle agent_id={server_handle.agent_id})."
                 )
                 return
         except Exception as check_err:
@@ -1201,11 +1247,28 @@ Or query Log Analytics:
         image = code_location_deploy_data.image
 
         if not image:
-            # Serverless/multiplex code locations have no container image and are
-            # managed by Dagster Cloud, not by this hybrid agent.  Skip quietly.
+            # Serverless/pex locations have no container image — managed by Dagster Cloud.
+            logger.info(
+                f"Skipping {deployment_name}:{location_name}: no container image configured "
+                "(serverless/pex location, not managed by this Azure hybrid agent)."
+            )
             raise Exception(
                 f"Skipping {deployment_name}:{location_name} — no container image "
                 "configured. This location is likely managed by Dagster Cloud Serverless."
+            )
+
+        # Detect ECR images early (before any logging or Azure calls).
+        # These are serverless locations managed by Dagster Cloud, not this agent.
+        _registry = image.split("/")[0] if "/" in image else None
+        if _registry and "ecr" in _registry and "amazonaws.com" in _registry:
+            logger.info(
+                f"Skipping {deployment_name}:{location_name}: AWS ECR image "
+                f"({_registry}) — serverless location, not managed by this Azure hybrid agent."
+            )
+            raise Exception(
+                f"Skipping {deployment_name}:{location_name} — image is on AWS ECR "
+                f"({_registry}). This location is managed by Dagster Cloud Serverless, "
+                "not by this Azure hybrid agent."
             )
 
         # Generate Container App name via shared helper.
@@ -1213,7 +1276,8 @@ Or query Log Analytics:
 
         logger.info(
             f"Starting server spinup: deployment={deployment_name}, "
-            f"location={location_name}, image={image}, app={app_name}"
+            f"location={location_name}, image={image}, app={app_name}, "
+            f"update_timestamp={desired_entry.update_timestamp}"
         )
 
         # Extract resource and env configuration from the code location's containerContext.
@@ -1235,14 +1299,35 @@ Or query Log Analytics:
                     if entry not in container_context_env_vars:
                         container_context_env_vars.append(entry)
 
-        # Log what Dagster+ is sending so we can verify env var forwarding.
+        # Classify env var sources for logging.
+        # _PLATFORM_KEYS are Dagster internal vars; everything else is user-defined.
+        _PLATFORM_KEYS = {
+            "DAGSTER_CLOUD_DEPLOYMENT_NAME", "DAGSTER_CLOUD_IS_BRANCH_DEPLOYMENT",
+            "DAGSTER_CLOUD_LOCATION_NAME", "DAGSTER_CLOUD_GIT_SHA",
+            "DAGSTER_CLOUD_GIT_URL", "DAGSTER_CLOUD_RAW_GIT_URL",
+            "DAGSTER_CLOUD_CODE_LOCATION_NAME", "DAGSTER_CLOUD_URL",
+            "DAGSTER_GRPC_MAX_WORKERS",
+        }
+        # Keys that should never have their values logged (tokens/secrets).
+        _SECRET_KEYS = {"DAGSTER_CLOUD_API_TOKEN"}
+
+        _cloud_ctx = code_location_deploy_data.cloud_context_env or {}
+        _cloud_ctx_user = {k: v for k, v in _cloud_ctx.items() if k not in _PLATFORM_KEYS and k not in _SECRET_KEYS}
+        _cloud_ctx_platform_keys = sorted(k for k in _cloud_ctx if k in _PLATFORM_KEYS or k in _SECRET_KEYS)
         logger.info(
-            f"cloud_context_env keys for {deployment_name}:{location_name}: "
-            f"{sorted((code_location_deploy_data.cloud_context_env or {}).keys())}"
+            f"cloud_context_env for {deployment_name}:{location_name}: "
+            f"platform keys={_cloud_ctx_platform_keys}, "
+            f"user-defined keys={sorted(_cloud_ctx_user.keys())}"
         )
+        if _cloud_ctx_user:
+            for _k, _v in sorted(_cloud_ctx_user.items()):
+                logger.info(f"  [cloud_context] {_k}={_v}")
+
+        ctx_keys = sorted(e.split("=", 1)[0].strip() if "=" in e else e.strip() for e in container_context_env_vars)
+        _ctx_namespaces = [k for k, v in container_context.items() if isinstance(v, dict)]
         logger.info(
-            f"container_context_env_vars for {deployment_name}:{location_name}: "
-            f"{container_context_env_vars}"
+            f"container_context env var keys for {deployment_name}:{location_name}: "
+            f"{ctx_keys} (namespaces: {_ctx_namespaces})"
         )
 
         # Build environment variables from all sources
@@ -1252,6 +1337,19 @@ Or query Log Analytics:
             cloud_context_env=code_location_deploy_data.cloud_context_env,
             container_context_env_vars=container_context_env_vars,
         )
+
+        # Log the complete set of keys being injected, and show values for
+        # user-defined non-secret vars so they can be verified in logs.
+        logger.info(
+            f"Injecting {len(env_vars)} env vars into code server "
+            f"{deployment_name}:{location_name}: "
+            f"{sorted(ev.name for ev in env_vars)}"
+        )
+        _user_injected = [(ev.name, ev.value) for ev in env_vars
+                          if ev.name not in _PLATFORM_KEYS and ev.name not in _SECRET_KEYS]
+        if _user_injected:
+            for _k, _v in sorted(_user_injected):
+                logger.info(f"  [injected] {_k}={_v}")
 
         # Generate a fresh ID for this specific spinup so that _remove_server_handle
         # can distinguish the live server (new ID in tags) from the handle being
@@ -1368,13 +1466,20 @@ Or query Log Analytics:
                         # Azure may report provisioning_state=Succeeded on GET while a
                         # new LRO is still in flight (state update is async).  In that
                         # case begin_create_or_update raises ContainerAppOperationInProgress.
-                        # Treat it identically to the InProgress guard above: skip the
-                        # update and let _wait_for_new_server_ready poll for completion.
-                        if "OperationInProgress" in str(update_err) or "ContainerAppOperationInProgress" in str(update_err):
-                            logger.info(
-                                f"Container App {app_name} has an LRO in progress "
-                                f"(provisioning_state was stale), skipping update — "
-                                "will poll for readiness."
+                        # Also catch Canceled/OperationFailed — Azure cancels operations
+                        # when a concurrent LRO from a previous agent run is in flight.
+                        # In all these cases skip the update and let
+                        # _wait_for_new_server_ready poll for completion.
+                        _transient = (
+                            "OperationInProgress",
+                            "ContainerAppOperationInProgress",
+                            "Canceled",
+                            "OperationFailed",
+                        )
+                        if any(t in str(update_err) for t in _transient):
+                            logger.warning(
+                                f"Container App {app_name} update was preempted by Azure "
+                                f"({type(update_err).__name__}). Will poll for readiness."
                             )
                         else:
                             raise
@@ -1387,11 +1492,32 @@ Or query Log Analytics:
                         container_app_name=app_name,
                         container_app_envelope=container_app,
                     )
-                    result = poller.result(timeout=180)
-                    logger.info(
-                        f"Server spinup started: {app_name} "
-                        f"(provisioning_state={result.provisioning_state})"
-                    )
+                    try:
+                        result = poller.result(timeout=180)
+                        logger.info(
+                            f"Server spinup started: {app_name} "
+                            f"(provisioning_state={result.provisioning_state})"
+                        )
+                    except Exception as create_err:
+                        # Azure cancels our create when a concurrent LRO from a previous
+                        # agent run is in flight for the same Container App name.
+                        # Don't raise — _wait_for_new_server_ready will poll; if the
+                        # previous LRO completed, the app will be ready; if not, it will
+                        # raise RuntimeError and the base class will retry next cycle.
+                        _transient = (
+                            "Canceled",
+                            "OperationFailed",
+                            "OperationInProgress",
+                            "ContainerAppOperationInProgress",
+                        )
+                        if any(t in str(create_err) for t in _transient):
+                            logger.warning(
+                                f"Container App {app_name} create was canceled by Azure "
+                                f"({type(create_err).__name__}). Polling for existing app "
+                                "or waiting for retry on next reconcile."
+                            )
+                        else:
+                            raise
                 else:
                     raise
 
@@ -1403,6 +1529,12 @@ Or query Log Analytics:
                 agent_id=agent_id,
                 update_timestamp=desired_entry.update_timestamp
             )
+
+            # Register this spinup in the in-memory active server registry.
+            # _remove_server_handle checks this dict so the UUID guard works
+            # even when begin_create_or_update was skipped (transitional LRO)
+            # and the Container App tag was NOT updated with the new UUID.
+            self._active_server_ids[app_name] = agent_id
 
             # Get the Container App's FQDN for gRPC endpoint
             # The FQDN format is: <app-name>.<env-domain>
