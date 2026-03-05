@@ -1077,9 +1077,11 @@ Or query Log Analytics:
                 container_app_name=app_name,
             )
             ps = app.provisioning_state or ""
-            if ps in ("Failed", "Canceled"):
+            running_status = getattr(app, 'running_status', None)
+            if ps in ("Failed", "Canceled") or running_status == "Stopped":
                 logger.info(
-                    f"Container App {app_name} has terminal state={ps}, "
+                    f"Container App {app_name} is not healthy "
+                    f"(provisioning_state={ps}, running_status={running_status}), "
                     "discarding stale handle so reconciler can recreate it"
                 )
                 return []
