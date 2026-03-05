@@ -590,13 +590,9 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
 
         # Check if this is AWS ECR (serverless mode - not supported for hybrid)
         if 'ecr' in registry_server and 'amazonaws.com' in registry_server:
-            raise ValueError(
-                f"Code location uses AWS ECR image ({registry_server}). "
-                "This indicates the code location is configured for Dagster Cloud Serverless mode. "
-                "For hybrid deployments with Azure Container Apps, please:\n"
-                "1. Build and push your code location image to Azure Container Registry (ACR)\n"
-                "2. Update the code location in Dagster Cloud to use the ACR image\n"
-                "3. Grant the agent's managed identity 'AcrPull' role on your ACR"
+            raise Exception(
+                f"Skipping serverless location — image is on AWS ECR ({registry_server}). "
+                "This location is managed by Dagster Cloud Serverless, not this hybrid agent."
             )
 
         # Other registries not supported
@@ -1205,9 +1201,11 @@ Or query Log Analytics:
         image = code_location_deploy_data.image
 
         if not image:
-            raise ValueError(
-                f"No image specified for {deployment_name}:{location_name}. "
-                "Azure Container Apps launcher requires container images."
+            # Serverless/multiplex code locations have no container image and are
+            # managed by Dagster Cloud, not by this hybrid agent.  Skip quietly.
+            raise Exception(
+                f"Skipping {deployment_name}:{location_name} — no container image "
+                "configured. This location is likely managed by Dagster Cloud Serverless."
             )
 
         # Generate Container App name via shared helper.
@@ -1558,6 +1556,19 @@ Or query Log Analytics:
         Returns the agent_id that created a particular gRPC server.
         """
         return handle.agent_id
+
+    def _check_for_image(self, code_location_deploy_data) -> None:
+        """Override to silently skip serverless/multiplex locations with no image.
+
+        The base class raises (and logs ERROR) for image=None locations.  In a
+        mixed deployment (some serverless, some hybrid), this floods the logs.
+        We suppress it here — the actual image check in _start_new_server_spinup
+        will still raise a clear message if a location unexpectedly reaches spinup.
+        """
+        image = getattr(code_location_deploy_data, 'image', None)
+        if image:
+            super()._check_for_image(code_location_deploy_data)
+        # image=None → serverless location, silently ignored
 
     def get_code_server_resource_limits(
         self, deployment_name: str, location_name: str
