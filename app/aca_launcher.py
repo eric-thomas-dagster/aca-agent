@@ -1343,16 +1343,31 @@ Or query Log Analytics:
                     logger.info(
                         f"Container App {app_name} exists with state={ps}, issuing create_or_update"
                     )
-                    poller = self.aca_client.container_apps.begin_create_or_update(
-                        resource_group_name=self.resource_group,
-                        container_app_name=app_name,
-                        container_app_envelope=container_app,
-                    )
-                    result = poller.result(timeout=180)
-                    logger.info(
-                        f"Server spinup started: {app_name} "
-                        f"(provisioning_state={result.provisioning_state})"
-                    )
+                    try:
+                        poller = self.aca_client.container_apps.begin_create_or_update(
+                            resource_group_name=self.resource_group,
+                            container_app_name=app_name,
+                            container_app_envelope=container_app,
+                        )
+                        result = poller.result(timeout=180)
+                        logger.info(
+                            f"Server spinup started: {app_name} "
+                            f"(provisioning_state={result.provisioning_state})"
+                        )
+                    except Exception as update_err:
+                        # Azure may report provisioning_state=Succeeded on GET while a
+                        # new LRO is still in flight (state update is async).  In that
+                        # case begin_create_or_update raises ContainerAppOperationInProgress.
+                        # Treat it identically to the InProgress guard above: skip the
+                        # update and let _wait_for_new_server_ready poll for completion.
+                        if "OperationInProgress" in str(update_err) or "ContainerAppOperationInProgress" in str(update_err):
+                            logger.info(
+                                f"Container App {app_name} has an LRO in progress "
+                                f"(provisioning_state was stale), skipping update — "
+                                "will poll for readiness."
+                            )
+                        else:
+                            raise
             except Exception as check_err:
                 # App doesn't exist yet (404) or GET failed — proceed with create.
                 if "ResourceNotFound" in str(check_err) or "Not Found" in str(check_err) or "404" in str(check_err):
