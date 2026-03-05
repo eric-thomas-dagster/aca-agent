@@ -1235,6 +1235,16 @@ Or query Log Analytics:
                     if entry not in container_context_env_vars:
                         container_context_env_vars.append(entry)
 
+        # Log what Dagster+ is sending so we can verify env var forwarding.
+        logger.info(
+            f"cloud_context_env keys for {deployment_name}:{location_name}: "
+            f"{sorted((code_location_deploy_data.cloud_context_env or {}).keys())}"
+        )
+        logger.info(
+            f"container_context_env_vars for {deployment_name}:{location_name}: "
+            f"{container_context_env_vars}"
+        )
+
         # Build environment variables from all sources
         env_vars = self._build_environment_variables(
             deployment_name,
