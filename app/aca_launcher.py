@@ -15,6 +15,7 @@ License: MIT
 """
 
 import os
+import uuid
 import logging
 import time
 import asyncio
@@ -1242,8 +1243,12 @@ Or query Log Analytics:
             container_context_env_vars=container_context_env_vars,
         )
 
-        # Get agent ID for tracking
-        agent_id = self._instance.instance_uuid if hasattr(self, '_instance') and self._instance else None
+        # Generate a fresh ID for this specific spinup so that _remove_server_handle
+        # can distinguish the live server (new ID in tags) from the handle being
+        # cleaned up (old ID).  Using instance_uuid was wrong because it is constant
+        # across all spinups, causing the ownership check to always match and
+        # delete the live Container App on every code-location update.
+        agent_id = str(uuid.uuid4())
 
         # Get registry credentials for pulling the image
         secrets, registries = self._get_registry_credentials(image)
