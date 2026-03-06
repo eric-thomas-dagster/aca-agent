@@ -525,6 +525,32 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         # Corresponds to env_vars in dagster.yaml user_code_launcher config.
         self.env_vars: List[str] = config.get("env_vars") or []
 
+        # Key Vault integration — mirrors ECS secrets_tag pattern.
+        # Reuses KEY_VAULT_URI and KEY_VAULT_SECRET_NAMES from the agent environment
+        # so the same secrets available to the agent are also injected into code
+        # servers and run workers as native ACA secret references (key_vault_secret_uri).
+        # The container runtime fetches secret values at container startup using the
+        # code server managed identity — values never pass through the agent process.
+        self.key_vault_uri: str = os.getenv("KEY_VAULT_URI", "").rstrip("/")
+        self.key_vault_secret_mappings: List[tuple] = []
+        _kv_names_raw = os.getenv("KEY_VAULT_SECRET_NAMES", "")
+        for _entry in _kv_names_raw.split(","):
+            _entry = _entry.strip()
+            if not _entry:
+                continue
+            if ":" in _entry:
+                _kv_name, _env_name = _entry.split(":", 1)
+            else:
+                _kv_name = _entry
+                _env_name = _entry
+            self.key_vault_secret_mappings.append((_kv_name.strip(), _env_name.strip()))
+        if self.key_vault_uri and self.key_vault_secret_mappings:
+            logger.info(
+                f"Key Vault integration enabled: {len(self.key_vault_secret_mappings)} secret(s) "
+                f"from {self.key_vault_uri} will be injected into code servers and run workers "
+                "as native ACA secret references."
+            )
+
         # Azure policy-required tags (can be configured via environment or config)
         self.required_tags = config.get("tags", {})
         # Add Department tag if not present (required by Azure policy)
@@ -1382,6 +1408,38 @@ Or query Log Analytics:
         # Get registry credentials for pulling the image
         secrets, registries = self._get_registry_credentials(image)
 
+        # Build native ACA Key Vault secret references — mirrors the ECS secrets_tag
+        # pattern where the container runtime (not the agent) fetches secrets at
+        # container startup using the managed identity.
+        #
+        # Each entry produces:
+        #   - A Secret with key_vault_secret_uri (fetched by ACA at container start)
+        #   - An EnvironmentVar with secret_ref (maps the secret into an env var)
+        #
+        # Run workers inherit these automatically — launch_run copies both
+        # configuration.secrets and template.containers[0].env from the code server.
+        kv_secrets: List[Secret] = []
+        kv_env_vars: List[EnvironmentVar] = []
+        if self.key_vault_uri and self.key_vault_secret_mappings:
+            if not self.code_server_identity_id:
+                logger.warning(
+                    "KEY_VAULT_URI is set but CODE_SERVER_IDENTITY_ID is not configured — "
+                    "cannot inject Key Vault secrets into code servers via managed identity. "
+                    "Set CODE_SERVER_IDENTITY_ID to the managed identity resource ID."
+                )
+            else:
+                logger.info(
+                    f"Injecting {len(self.key_vault_secret_mappings)} Key Vault secret(s) "
+                    f"into {deployment_name}:{location_name} as native ACA secret refs:"
+                )
+                for kv_name, env_name in self.key_vault_secret_mappings:
+                    # ACA secret names: lowercase, hyphens only (no underscores)
+                    aca_secret_name = kv_name.lower().replace("_", "-")
+                    kv_uri = f"{self.key_vault_uri}/secrets/{kv_name}"
+                    kv_secrets.append(Secret(name=aca_secret_name, key_vault_secret_uri=kv_uri))
+                    kv_env_vars.append(EnvironmentVar(name=env_name, secret_ref=aca_secret_name))
+                    logger.info(f"  [kv] {kv_name} → env:{env_name} (aca-secret: {aca_secret_name})")
+
         # Create Container App configuration
         container_app = ContainerApp(
             location=self.location,
@@ -1408,7 +1466,7 @@ Or query Log Analytics:
                     allow_insecure=True,
                 ),
                 # Registry credentials (if needed for private registries)
-                secrets=secrets,
+                secrets=secrets + kv_secrets,
                 registries=registries if registries else None,
                 active_revisions_mode="Single",
             ),
@@ -1421,7 +1479,7 @@ Or query Log Analytics:
                             cpu=cpu,
                             memory=memory
                         ),
-                        env=env_vars,
+                        env=env_vars + kv_env_vars,
                     )
                 ],
                 scale=Scale(
