@@ -1051,11 +1051,20 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
                 env[k.strip()] = v
 
         # 3. Deployment-level env vars from Dagster Cloud (e.g. DAGSTER_CLOUD_API_TOKEN)
-        if cloud_context_env:
-            env.update(cloud_context_env)
+        # Use explicit None check so a dict with empty-string values is still applied.
+        if cloud_context_env is not None:
+            for k, v in cloud_context_env.items():
+                env[k] = str(v) if v is not None else ""
 
         # 4. Code location containerContext env_vars.
         # Each entry is "KEY=VALUE" (literal) or "KEY" (forward from agent env).
+        # Priority rules for bare keys (no "="):
+        #   - If the agent's os.environ has the key, use that value (intended override).
+        #   - If the agent doesn't have it BUT an earlier layer already set a real value
+        #     (e.g. from cloud_context_env), keep the existing value — don't clobber it
+        #     with an empty default.
+        #   - If nothing set it yet, default to "" so dg.EnvVar() resolves without
+        #     raising "env var not set" at ExecutionPlanSnapshot time.
         if container_context_env_vars:
             for entry in container_context_env_vars:
                 if "=" in entry:
@@ -1063,16 +1072,29 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
                     env[k.strip()] = v
                 else:
                     key = entry.strip()
-                    if key:
-                        agent_val = os.environ.get(key, "")
+                    if not key:
+                        continue
+                    agent_val = os.environ.get(key)
+                    if agent_val is not None:
+                        # Agent has a real value — use it (may override cloud_context_env).
                         env[key] = agent_val
-                        if not agent_val:
-                            logger.warning(
-                                f"containerContext env_var '{key}' is not set in the "
-                                "agent's environment — forwarding as empty string. "
-                                "dg.EnvVar() will resolve to '' unless the agent "
-                                "Container App has this env var set."
-                            )
+                    elif key in env:
+                        # Already set by an earlier layer (e.g. cloud_context_env) and
+                        # agent doesn't have it — keep the existing value.
+                        logger.info(
+                            f"containerContext env_var '{key}' not in agent env; "
+                            f"keeping value from earlier layer."
+                        )
+                    else:
+                        # Not set anywhere — forward as empty string so dg.EnvVar()
+                        # resolves to '' rather than raising PostProcessingError.
+                        env[key] = ""
+                        logger.warning(
+                            f"containerContext env_var '{key}' is not set in the agent's "
+                            "environment and was not provided by cloud_context_env — "
+                            "forwarding as empty string. Set it on the agent Container App "
+                            "for a real value."
+                        )
 
         # 5. Forward DAGSTER_GRPC_MAX_WORKERS if set on the agent
         grpc_max_workers = os.environ.get("DAGSTER_GRPC_MAX_WORKERS")
