@@ -115,6 +115,13 @@ class AcaRunLauncher(RunLauncher):
         )
         self.environment_id = env.id
 
+        # In-memory set of run IDs launched in this session.
+        # ARM eventual consistency means a GET immediately after a PUT may return
+        # 404, so we track launched runs in memory as the primary dedup layer.
+        # The Azure GET check below is the cross-restart fallback.
+        self._launched_run_ids: set = set()
+        self._launch_lock = threading.Lock()
+
         logger.info(f"AcaRunLauncher initialized: rg={self.resource_group}, env={self.environment_name}")
 
         # Start background thread to delete completed run Container Apps.
@@ -217,6 +224,31 @@ class AcaRunLauncher(RunLauncher):
         app_name = f"dagster-run-{run_id[:8]}"
         app_name = app_name.lower().replace("_", "-")
 
+        # Idempotency guard — two layers:
+        # 1. In-memory set: catches rapid same-process retries before ARM eventual
+        #    consistency would make the Container App visible via GET.
+        # 2. Azure GET: catches retries across agent restarts.
+        with self._launch_lock:
+            if run_id in self._launched_run_ids:
+                logger.info(f"Run {run_id} already launched this session, skipping duplicate.")
+                return
+            try:
+                existing_run_app = self.aca_client.container_apps.get(
+                    resource_group_name=self.resource_group,
+                    container_app_name=app_name,
+                )
+                logger.info(
+                    f"Run worker {app_name} already exists "
+                    f"(provisioning_state={existing_run_app.provisioning_state}), "
+                    "skipping duplicate launch."
+                )
+                self._launched_run_ids.add(run_id)
+                return
+            except Exception as _check_err:
+                if "ResourceNotFound" not in str(_check_err) and "404" not in str(_check_err):
+                    raise
+            self._launched_run_ids.add(run_id)
+
         logger.info(f"Creating Container App for run: app={app_name}, image={container_image}")
 
         # Build environment variables for the run
@@ -252,12 +284,9 @@ class AcaRunLauncher(RunLauncher):
                     if val is not None:
                         env_vars.append(EnvironmentVar(name=key, value=val))
 
-        # Copy secrets from the code server so that any secretRef env vars work in
-        # the run worker container (ACA requires the secret to be declared in the
-        # same Container App's configuration.secrets list).
-        code_server_secrets = list(
-            code_server_app.configuration.secrets or []
-        ) if code_server_app.configuration else []
+        # KV secrets are forwarded as plain env vars via self.env_vars (set in __init__).
+        # No ACA secret references needed — entrypoint.py already fetched them into os.environ.
+        code_server_secrets: List[Secret] = []
 
         # Build the command for executing the run
         # Following the OSS ECS/Docker launcher pattern from dagster-aws/dagster-docker
@@ -525,30 +554,32 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
         # Corresponds to env_vars in dagster.yaml user_code_launcher config.
         self.env_vars: List[str] = config.get("env_vars") or []
 
-        # Key Vault integration — mirrors ECS secrets_tag pattern.
-        # Reuses KEY_VAULT_URI and KEY_VAULT_SECRET_NAMES from the agent environment
-        # so the same secrets available to the agent are also injected into code
-        # servers and run workers as native ACA secret references (key_vault_secret_uri).
-        # The container runtime fetches secret values at container startup using the
-        # code server managed identity — values never pass through the agent process.
-        self.key_vault_uri: str = os.getenv("KEY_VAULT_URI", "").rstrip("/")
-        self.key_vault_secret_mappings: List[tuple] = []
+        # Key Vault integration — entrypoint.py already fetched KV secrets into
+        # os.environ before the agent started. We forward those values as plain
+        # environment variables to code servers and run workers via self.env_vars,
+        # so no ACA native secret references (and no SDK version dependencies) needed.
         _kv_names_raw = os.getenv("KEY_VAULT_SECRET_NAMES", "")
+        _kv_forwarded = 0
         for _entry in _kv_names_raw.split(","):
             _entry = _entry.strip()
             if not _entry:
                 continue
-            if ":" in _entry:
-                _kv_name, _env_name = _entry.split(":", 1)
+            _env_name = _entry.split(":", 1)[1].strip() if ":" in _entry else _entry.strip()
+            _val = os.environ.get(_env_name)
+            if _val is not None:
+                # Only add if not already explicit in config env_vars
+                if not any(e.startswith(f"{_env_name}=") for e in self.env_vars):
+                    self.env_vars.append(f"{_env_name}={_val}")
+                    _kv_forwarded += 1
             else:
-                _kv_name = _entry
-                _env_name = _entry
-            self.key_vault_secret_mappings.append((_kv_name.strip(), _env_name.strip()))
-        if self.key_vault_uri and self.key_vault_secret_mappings:
+                logger.warning(
+                    f"KEY_VAULT_SECRET_NAMES entry '{_entry}': env var '{_env_name}' "
+                    "not found in agent environment. Was it fetched from Key Vault?"
+                )
+        if _kv_forwarded:
             logger.info(
-                f"Key Vault integration enabled: {len(self.key_vault_secret_mappings)} secret(s) "
-                f"from {self.key_vault_uri} will be injected into code servers and run workers "
-                "as native ACA secret references."
+                f"Forwarding {_kv_forwarded} Key Vault-fetched secret(s) to code servers "
+                "and run workers as environment variables."
             )
 
         # Azure policy-required tags (can be configured via environment or config)
@@ -1033,14 +1064,14 @@ class AcaUserCodeLauncher(DagsterCloudUserCodeLauncher):
                 else:
                     key = entry.strip()
                     if key:
-                        agent_val = os.environ.get(key)
-                        if agent_val is not None:
-                            env[key] = agent_val
-                        else:
+                        agent_val = os.environ.get(key, "")
+                        env[key] = agent_val
+                        if not agent_val:
                             logger.warning(
                                 f"containerContext env_var '{key}' is not set in the "
-                                "agent's environment — it will not be forwarded to the "
-                                "code server. Set it on the agent Container App."
+                                "agent's environment — forwarding as empty string. "
+                                "dg.EnvVar() will resolve to '' unless the agent "
+                                "Container App has this env var set."
                             )
 
         # 5. Forward DAGSTER_GRPC_MAX_WORKERS if set on the agent
@@ -1362,13 +1393,22 @@ Or query Log Analytics:
         _cloud_ctx_user = {k: v for k, v in _cloud_ctx.items() if k not in _PLATFORM_KEYS and k not in _SECRET_KEYS}
         _cloud_ctx_platform_keys = sorted(k for k in _cloud_ctx if k in _PLATFORM_KEYS or k in _SECRET_KEYS)
         logger.info(
-            f"cloud_context_env for {deployment_name}:{location_name}: "
+            f"cloud_context_env for {deployment_name}:{location_name} "
+            f"({len(_cloud_ctx)} total keys): "
             f"platform keys={_cloud_ctx_platform_keys}, "
             f"user-defined keys={sorted(_cloud_ctx_user.keys())}"
         )
         if _cloud_ctx_user:
             for _k, _v in sorted(_cloud_ctx_user.items()):
                 logger.info(f"  [cloud_context] {_k}={_v}")
+        else:
+            logger.warning(
+                f"cloud_context_env for {deployment_name}:{location_name} has NO user-defined keys. "
+                "Dagster+ UI deployment env vars will NOT be set on the code server. "
+                "dg.EnvVar() in resources will fail unless vars are set via ARM template or "
+                "KEY_VAULT_SECRET_NAMES. If you expect user-defined vars here, verify "
+                "UserCodeDeploymentType is K8S and that env vars are set in the Dagster+ UI."
+            )
 
         ctx_keys = sorted(e.split("=", 1)[0].strip() if "=" in e else e.strip() for e in container_context_env_vars)
         _ctx_namespaces = [k for k, v in container_context.items() if isinstance(v, dict)]
@@ -1408,37 +1448,8 @@ Or query Log Analytics:
         # Get registry credentials for pulling the image
         secrets, registries = self._get_registry_credentials(image)
 
-        # Build native ACA Key Vault secret references — mirrors the ECS secrets_tag
-        # pattern where the container runtime (not the agent) fetches secrets at
-        # container startup using the managed identity.
-        #
-        # Each entry produces:
-        #   - A Secret with key_vault_secret_uri (fetched by ACA at container start)
-        #   - An EnvironmentVar with secret_ref (maps the secret into an env var)
-        #
-        # Run workers inherit these automatically — launch_run copies both
-        # configuration.secrets and template.containers[0].env from the code server.
-        kv_secrets: List[Secret] = []
-        kv_env_vars: List[EnvironmentVar] = []
-        if self.key_vault_uri and self.key_vault_secret_mappings:
-            if not self.code_server_identity_id:
-                logger.warning(
-                    "KEY_VAULT_URI is set but CODE_SERVER_IDENTITY_ID is not configured — "
-                    "cannot inject Key Vault secrets into code servers via managed identity. "
-                    "Set CODE_SERVER_IDENTITY_ID to the managed identity resource ID."
-                )
-            else:
-                logger.info(
-                    f"Injecting {len(self.key_vault_secret_mappings)} Key Vault secret(s) "
-                    f"into {deployment_name}:{location_name} as native ACA secret refs:"
-                )
-                for kv_name, env_name in self.key_vault_secret_mappings:
-                    # ACA secret names: lowercase, hyphens only (no underscores)
-                    aca_secret_name = kv_name.lower().replace("_", "-")
-                    kv_uri = f"{self.key_vault_uri}/secrets/{kv_name}"
-                    kv_secrets.append(Secret(name=aca_secret_name, key_vault_secret_uri=kv_uri))
-                    kv_env_vars.append(EnvironmentVar(name=env_name, secret_ref=aca_secret_name))
-                    logger.info(f"  [kv] {kv_name} → env:{env_name} (aca-secret: {aca_secret_name})")
+        # KV secrets are already resolved into env_vars via __init__ (entrypoint.py
+        # fetched them into os.environ before the agent started).
 
         # Create Container App configuration
         container_app = ContainerApp(
@@ -1466,7 +1477,7 @@ Or query Log Analytics:
                     allow_insecure=True,
                 ),
                 # Registry credentials (if needed for private registries)
-                secrets=secrets + kv_secrets,
+                secrets=secrets,
                 registries=registries if registries else None,
                 active_revisions_mode="Single",
             ),
@@ -1479,7 +1490,7 @@ Or query Log Analytics:
                             cpu=cpu,
                             memory=memory
                         ),
-                        env=env_vars + kv_env_vars,
+                        env=env_vars,
                     )
                 ],
                 scale=Scale(
@@ -1621,6 +1632,24 @@ Or query Log Analytics:
                 resource_group_name=self.resource_group,
                 container_app_name=app_name
             )
+
+            # Verify env vars are actually set on the Container App.
+            # This confirms cloud_context_env was forwarded correctly.
+            _actual_env = {ev.name for ev in (app.template.containers[0].env or [])}
+            _expected_user_keys = set(_cloud_ctx_user.keys())
+            _missing = _expected_user_keys - _actual_env
+            if _missing:
+                logger.warning(
+                    f"Container App {app_name} is MISSING expected env vars from cloud_context_env: "
+                    f"{sorted(_missing)}. dg.EnvVar() will fail for these keys."
+                )
+            else:
+                logger.info(
+                    f"Container App {app_name} env var verification: "
+                    f"all {len(_expected_user_keys)} user-defined key(s) confirmed present "
+                    f"({sorted(_expected_user_keys) or 'none expected'}). "
+                    f"Total env vars on container: {len(_actual_env)}"
+                )
 
             # Use the app's FQDN if available, otherwise use app name
             host = app.configuration.ingress.fqdn if (
@@ -1822,12 +1851,10 @@ Or query Log Analytics:
 
     @property
     def user_code_deployment_type(self) -> UserCodeDeploymentType:
-        """
-        Return the deployment type for telemetry/reporting.
-
-        # ECS is the closest supported type for ACA: both are container-based hybrid
-        # agents where each code location gets its own container and run workers are
-        # separate ephemeral containers. Using DOCKER caused Dagster Cloud to omit
-        # user-defined deployment env vars from cloud_context_env.
-        return UserCodeDeploymentType.ECS
+        # K8S matches Hooli's deployment type and is confirmed to cause Dagster Cloud
+        # to include user-defined deployment env vars in cloud_context_env — which
+        # is required for dg.EnvVar() to work in resources on the code server.
+        # ACA is architecturally similar to K8s: each code location gets its own
+        # container and run workers are separate ephemeral containers.
+        return UserCodeDeploymentType.K8S
 
