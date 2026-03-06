@@ -1767,7 +1767,8 @@ Or query Log Analytics:
         """
         Return the deployment type for telemetry/reporting.
 
-        We use DOCKER as the closest match for Container Apps.
-        """
-        return UserCodeDeploymentType.DOCKER
+        # K8s is the closest supported type for a container-based hybrid agent.
+        # Using DOCKER caused Dagster Cloud to omit user-defined deployment env vars
+        # from cloud_context_env — ECS and K8s hybrid agents receive them.
+        return UserCodeDeploymentType.K8S
 
