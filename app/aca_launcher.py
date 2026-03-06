@@ -86,9 +86,13 @@ class AcaRunLauncher(RunLauncher):
     Each run gets its own isolated container that scales down to 0 after completion.
     """
 
-    def __init__(self, inst_data=None, **kwargs):
+    def __init__(self, env_vars: Optional[List[str]] = None, inst_data=None, **kwargs):
         """Initialize the ACA run launcher with Azure credentials."""
         super().__init__()
+
+        # Launcher-level env vars forwarded to every run worker (KEY=VALUE strings).
+        # Passed from AcaUserCodeLauncher.run_launcher() — mirrors ECS pattern.
+        self.env_vars: List[str] = env_vars or []
 
         # Get Azure configuration from environment (set by agent)
         self.subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
@@ -230,6 +234,23 @@ class AcaRunLauncher(RunLauncher):
             for env_var in code_server_app.template.containers[0].env:
                 if env_var.name not in ["DAGSTER_CLOUD_CODE_LOCATION_NAME"]:
                     env_vars.append(env_var)
+
+        # Apply launcher-level env_vars on top of the code-server copy.
+        # Mirrors the ECS pattern: env_vars from dagster.yaml are explicitly
+        # forwarded to run workers (KEY=VALUE literal or bare KEY from agent env).
+        existing_names = {ev.name for ev in env_vars}
+        for entry in self.env_vars:
+            if "=" in entry:
+                k, v = entry.split("=", 1)
+                k = k.strip()
+                env_vars = [ev for ev in env_vars if ev.name != k]
+                env_vars.append(EnvironmentVar(name=k, value=v))
+            else:
+                key = entry.strip()
+                if key and key not in existing_names:
+                    val = os.environ.get(key)
+                    if val is not None:
+                        env_vars.append(EnvironmentVar(name=key, value=val))
 
         # Copy secrets from the code server so that any secretRef env vars work in
         # the run worker container (ACA requires the secret to be declared in the
@@ -1737,7 +1758,7 @@ Or query Log Analytics:
         but use the same container image. The run launcher creates temporary Container Apps
         for each run execution.
         """
-        launcher = AcaRunLauncher()
+        launcher = AcaRunLauncher(env_vars=self.env_vars)
         launcher.register_instance(self._instance)
         return launcher
 
