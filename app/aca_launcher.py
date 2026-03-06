@@ -1767,8 +1767,9 @@ Or query Log Analytics:
         """
         Return the deployment type for telemetry/reporting.
 
-        # K8s is the closest supported type for a container-based hybrid agent.
-        # Using DOCKER caused Dagster Cloud to omit user-defined deployment env vars
-        # from cloud_context_env — ECS and K8s hybrid agents receive them.
-        return UserCodeDeploymentType.K8S
+        # ECS is the closest supported type for ACA: both are container-based hybrid
+        # agents where each code location gets its own container and run workers are
+        # separate ephemeral containers. Using DOCKER caused Dagster Cloud to omit
+        # user-defined deployment env vars from cloud_context_env.
+        return UserCodeDeploymentType.ECS
 
